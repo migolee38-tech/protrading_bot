@@ -53,6 +53,7 @@ git push
 |------|------|
 | `BINANCE_API_KEY` | 幣安 API Key |
 | `BINANCE_API_SECRET` | 幣安 API Secret |
+| `BINANCE_STRICT_FUTURES` | 設為 `1` 時，永續模式**僅**用 `fapi.binance.com`，不 fallback 現貨（建議亞洲主機） |
 
 （與本機 `.env`、`.streamlit/secrets.toml.example` 相同欄位名。）
 
@@ -64,7 +65,8 @@ git push
 2. 開啟網址，確認：  
    - 側欄 **Top 100** 能載入  
    - 頂部 **市場 = 永續** 時 K 線、回測正常  
-   - 不應再出現 `HTTPError: 451`（若仍 451，可換 Zeabur 區域或查看 Logs）  
+   - 不應再出現 `HTTPError: 451`（若仍 451，可換 Zeabur 區域或查看 Logs）
+   - 側欄應顯示 **榜單行情：永續 (fapi)**；K 線區無「非永續 fapi」警告  
 3. 可綁定自訂網域（Zeabur 服務設定）
 
 ---

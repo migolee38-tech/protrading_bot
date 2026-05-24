@@ -34,7 +34,7 @@ from core.lightweight_tv import (
     markers_for_open_orders,
     markers_for_strategies,
 )
-from core.market_data import MarketType, fetch_klines, pop_source_note
+from core.market_data import MarketType, pop_source_note
 from core.order_executor import (
     OrderMode,
     OrderRequest,
@@ -43,7 +43,7 @@ from core.order_executor import (
     scan_and_paper_trade,
 )
 from core.strategy_registry import STRATEGIES, scan_signals_for
-from core.universe import top_usdt_pairs_by_volume
+from core.universe import top_usdt_pairs_by_volume, universe_price_source_label
 
 REPORTS_DIR = Path(__file__).parent / "data" / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -100,8 +100,13 @@ def _cached_universe(top_n: int, market: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
-def _cached_klines(symbol: str, interval: str, limit: int, market: str) -> pd.DataFrame:
-    return fetch_klines(symbol, interval=interval, limit=limit, market=market)  # type: ignore[arg-type]
+def _cached_klines(
+    symbol: str, interval: str, limit: int, market: str
+) -> tuple[pd.DataFrame, str]:
+    """回傳 (K 線 DataFrame, 實際來源 futures|spot|...)。"""
+    df = fetch_klines(symbol, interval=interval, limit=limit, market=market)  # type: ignore[arg-type]
+    src = str(df.attrs.get("price_source", market))
+    return df, src
 
 
 def _last_price(sym: str, universe_df: pd.DataFrame, market: MarketType) -> float:
@@ -110,7 +115,7 @@ def _last_price(sym: str, universe_df: pd.DataFrame, market: MarketType) -> floa
         if not row.empty and "last_price" in row.columns:
             return float(row.iloc[0]["last_price"])
     try:
-        raw = _cached_klines(sym, "1m", 2, market)
+        raw, _ = _cached_klines(sym, "1m", 2, market)
         return float(raw.iloc[-1]["close"])
     except Exception:
         return 0.0
@@ -176,7 +181,7 @@ def _strategy_order_hints(
     meta = STRATEGIES.get(sid)
     if meta is None:
         return None
-    raw = _cached_klines(sym, meta.timeframe, 500, market)
+    raw, _ = _cached_klines(sym, meta.timeframe, 500, market)
     prep = meta.prepare_df(raw)
     sigs = scan_signals_for(sid, prep)
     if not sigs:
@@ -226,9 +231,18 @@ def _sidebar_panel(market: MarketType) -> tuple[int, int, pd.DataFrame]:
             selection_default=_dataframe_row_selection(default_row),
         )
         _apply_top100_table_selection(universe_df)
+        src_lbl = universe_price_source_label(universe_df)
         st.sidebar.caption(
-            f"共 {len(universe_df)} 檔 · {'永續' if market == 'futures' else '現貨'} · 點選列切換 K 線"
+            f"共 {len(universe_df)} 檔 · {'永續' if market == 'futures' else '現貨'} · "
+            f"榜單行情：{src_lbl} · 點選列切換 K 線"
         )
+        if market == "futures" and src_lbl != "永續 (fapi)":
+            st.sidebar.warning(
+                "目前 Top 100 並非永續 fapi 報價。"
+                "亞洲主機可在 Zeabur 變數設 BINANCE_STRICT_FUTURES=1 強制僅用永續；"
+                "或點「重新抓取榜單」。",
+                icon="⚠️",
+            )
 
     top_n = st.sidebar.slider(
         "成交量 Top N",
@@ -614,7 +628,13 @@ def _main_workstation(
 
     with col_chart:
         try:
-            raw = _cached_klines(sym, chart_tf, kline_limit, market)
+            raw, k_src = _cached_klines(sym, chart_tf, kline_limit, market)
+            if market == "futures" and k_src and k_src != "futures":
+                st.warning(
+                    f"歷史 K 線來源為「{k_src}」，非永續 fapi；"
+                    "與合約即時價可能不一致。",
+                    icon="⚠️",
+                )
             candles, volumes = df_to_tv_series(raw)
             markers: list[dict] = []
             if STRATEGIES[chart_highlight].timeframe == chart_tf:
@@ -686,7 +706,7 @@ def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int)
                 events_map: dict[str, list[str]] = {}
                 for sid in strategy_ids:
                     meta = STRATEGIES[sid]
-                    raw_s = _cached_klines(sym, meta.timeframe, kline_limit, market)
+                    raw_s, _ = _cached_klines(sym, meta.timeframe, kline_limit, market)
                     r = run_backtest(sid, pair, raw_s)
                     rows.append(r.to_dict())
                     events_map[sid] = r.events

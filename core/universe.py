@@ -11,6 +11,7 @@ import pandas as pd
 from core.market_data import (
     BinanceAPIError,
     MarketType,
+    PriceSource,
     fallback_symbols,
     fetch_ticker_24h,
     symbol_display,
@@ -19,14 +20,25 @@ from core.market_data import (
 _CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+_PRICE_SOURCE_COL = "price_source"
+
 
 def _cache_path(market: MarketType, top_n: int) -> Path:
     today = date.today().isoformat()
     return _CACHE_DIR / f"top_volume_{market}_{top_n}_{today}.json"
 
 
+def _cache_is_valid_for_market(rows: list[dict], market: MarketType) -> bool:
+    """永續模式不使用來源為現貨的舊快取（避免誤標為永續價）。"""
+    if not rows:
+        return False
+    src = rows[0].get(_PRICE_SOURCE_COL, "futures")
+    if market == "futures":
+        return src == "futures"
+    return True
+
+
 def _static_universe(top_n: int, reason: str) -> pd.DataFrame:
-    """API 全失敗時的內建榜單，避免 Streamlit Cloud 整頁 traceback。"""
     from core.market_data import _set_source_note
 
     syms = fallback_symbols(top_n)
@@ -37,6 +49,7 @@ def _static_universe(top_n: int, reason: str) -> pd.DataFrame:
             "quote_volume_24h": 0.0,
             "price_change_pct": 0.0,
             "last_price": 0.0,
+            _PRICE_SOURCE_COL: "static",
         }
         for s in syms
     ]
@@ -44,7 +57,7 @@ def _static_universe(top_n: int, reason: str) -> pd.DataFrame:
     df["rank"] = df.index + 1
     _set_source_note(
         f"無法連線幣安 API（{reason}），已顯示內建常用幣種清單；"
-        "即時 K 線若仍失敗，請改選現貨或稍後再試。"
+        "價格需待 API 恢復後更新。"
     )
     return df
 
@@ -54,15 +67,20 @@ def top_usdt_pairs_by_volume(
     market: MarketType = "futures",
     use_cache: bool = True,
 ) -> pd.DataFrame:
-    """依 24h 報價成交量（quoteVolume）排序，回傳 USDT 永續/現貨交易對。"""
+    """依 24h 報價成交量排序；market=futures 時優先永續 fapi ticker。"""
     cache_file = _cache_path(market, top_n)
     if use_cache and cache_file.exists():
         with open(cache_file, encoding="utf-8") as f:
             rows = json.load(f)
-        return pd.DataFrame(rows)
+        if _cache_is_valid_for_market(rows, market):
+            return pd.DataFrame(rows)
+        try:
+            cache_file.unlink()
+        except OSError:
+            pass
 
     try:
-        tickers = fetch_ticker_24h(market=market)
+        tickers, price_source = fetch_ticker_24h(market=market)
     except BinanceAPIError as exc:
         return _static_universe(top_n, str(exc))
 
@@ -83,6 +101,7 @@ def top_usdt_pairs_by_volume(
                 "quote_volume_24h": qv,
                 "price_change_pct": float(t.get("priceChangePercent", 0) or 0),
                 "last_price": float(t.get("lastPrice", 0) or 0),
+                _PRICE_SOURCE_COL: price_source,
             }
         )
 
@@ -97,10 +116,26 @@ def top_usdt_pairs_by_volume(
     )
     df["rank"] = df.index + 1
 
-    try:
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(df.to_dict(orient="records"), f, ensure_ascii=False)
-    except OSError:
-        pass
+    # 僅在永續模式且確實來自 fapi 時，寫入永續快取
+    if market != "futures" or price_source == "futures":
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(df.to_dict(orient="records"), f, ensure_ascii=False)
+        except OSError:
+            pass
 
     return df
+
+
+def universe_price_source_label(df: pd.DataFrame) -> str:
+    """供 UI 顯示榜單實際行情來源。"""
+    if df.empty or _PRICE_SOURCE_COL not in df.columns:
+        return "未知"
+    src: PriceSource = df.iloc[0][_PRICE_SOURCE_COL]  # type: ignore[assignment]
+    labels = {
+        "futures": "永續 (fapi)",
+        "spot": "現貨",
+        "spot_mirror": "現貨鏡像",
+        "static": "內建清單",
+    }
+    return labels.get(src, str(src))
