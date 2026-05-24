@@ -187,7 +187,8 @@ def build_lightweight_chart_html(
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
 <style>
-  html, body {{ margin: 0; padding: 0; background: #131722; overflow: hidden; font-family: system-ui, sans-serif; }}
+  html, body {{ margin: 0; padding: 0; background: #131722; overflow: hidden;
+    font-family: "Noto Sans CJK TC", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif; }}
   #wrap {{ width: 100%; height: 100vh; display: flex; flex-direction: column; }}
   #hdr {{ color: #d1d4dc; font-size: 12px; padding: 6px 8px 4px; border-bottom: 1px solid #2a2e39; }}
   #titleRow {{ font-weight: 600; margin-bottom: 4px; }}

@@ -11,8 +11,14 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Streamlit Cloud（Linux）預設 locale 有時非 UTF-8，避免中文讀寫異常
+os.environ.setdefault("LANG", "C.UTF-8")
+os.environ.setdefault("LC_ALL", "C.UTF-8")
+os.environ.setdefault("PYTHONUTF8", "1")
 
 import pandas as pd
 import streamlit as st
@@ -28,7 +34,7 @@ from core.lightweight_tv import (
     markers_for_open_orders,
     markers_for_strategies,
 )
-from core.market_data import MarketType, fetch_klines
+from core.market_data import MarketType, fetch_klines, pop_source_note
 from core.order_executor import (
     OrderMode,
     OrderRequest,
@@ -48,6 +54,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# 雲端容器若無 CJK 字體，中文可能顯示為方塊或異常符號
+_CJK_FONT_CSS = """
+<style>
+  html, body, [class*="st-"] {
+    font-family: "Noto Sans CJK TC", "Noto Sans TC", "PingFang TC",
+      "Microsoft JhengHei", "Heiti TC", sans-serif !important;
+  }
+</style>
+"""
+st.markdown(_CJK_FONT_CSS, unsafe_allow_html=True)
 
 
 def _init_state() -> None:
@@ -644,7 +661,12 @@ def _main_workstation(
                 )
 
         except Exception as exc:
-            st.error(f"無法載入圖表：{exc}")
+            _show_binance_source_banner()
+            st.error(
+                f"無法載入圖表：{exc}\n\n"
+                "Streamlit Cloud 伺服器若無法連幣安，請在頂部改選「現貨」或稍後重試；"
+                "即時 WebSocket 仍由你的瀏覽器直連幣安。"
+            )
 
 
 def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int) -> None:
@@ -719,6 +741,12 @@ def _tab_paper_fills() -> None:
     st.dataframe(show, use_container_width=True, height=520)
 
 
+def _show_binance_source_banner() -> None:
+    note = pop_source_note()
+    if note:
+        st.warning(note, icon="⚠️")
+
+
 def main() -> None:
     _init_state()
     st.title("📈 量化交易工作站")
@@ -743,6 +771,7 @@ def main() -> None:
             kline_limit,
             universe_df,
         )
+        _show_binance_source_banner()
 
     with tab_bt:
         strategy_ids = st.session_state.get("active_strategy_ids") or list(STRATEGIES.keys())

@@ -99,6 +99,8 @@ BINANCE_API_SECRET = "你的密鑰"
 | 畫面空白 / 錯誤 | 在 Cloud 點 **Manage app** → **Logs** 查看 traceback |
 | 更新程式後網址沒變 | `git push` 後 Cloud 通常會自動 redeploy；否則 **Reboot app** |
 | 想限制誰能看 | 免費版無密碼；需 Streamlit 付費方案或改自建 + 反向代理驗證 |
+| 中文變亂碼／方塊 | 確認 `packages.txt` 含 `fonts-noto-cjk` 並已 push；Cloud **Reboot app**；瀏覽器用 Chrome、關閉自動翻譯 |
+| `HTTPError: 451` 幣安 API | Cloud 主機 IP 被幣安封鎖；程式會自動改抓 `data-api.binance.vision` 現貨行情；永續 REST 不可用時 Top/K 線會用現貨替代 |
 
 ---
 

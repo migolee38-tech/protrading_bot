@@ -14,9 +14,15 @@ streamlit run streamlit_app.py
 
 或：`./start_dashboard.sh`
 
+## 部署到 Zeabur（建議：亞洲機房、永續行情）
+
+請依 **[DEPLOY_ZEABUR.md](./DEPLOY_ZEABUR.md)** 逐步操作（使用專案內 `Dockerfile`，區域建議 **Singapore**）。
+
 ## 部署到 Streamlit Community Cloud（公開網址）
 
 請依 **[DEPLOY_STREAMLIT_CLOUD.md](./DEPLOY_STREAMLIT_CLOUD.md)** 逐步操作。
+
+> 美國主機可能無法連幣安永續 API（HTTP 451）；若要以 **永續價格** 為主，請優先使用 Zeabur。
 
 部署成功後會得到類似 `https://你的應用名稱.streamlit.app` 的網址，可分享給他人瀏覽（不需你的電腦 IP）。
 

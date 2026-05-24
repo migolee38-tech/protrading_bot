@@ -1,0 +1,14 @@
+.venv/
+.env
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+data/cache/
+data/reports/
+data/paper_orders.json
+state.json
+*.md
+!README.md
+docs/
