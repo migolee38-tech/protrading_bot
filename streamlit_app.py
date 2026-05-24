@@ -26,9 +26,6 @@ import streamlit.components.v1 as components
 
 from core.backtest_report import run_backtest
 from core.lightweight_tv import (
-    binance_agg_trade_ws_url,
-    binance_kline_ws_url,
-    binance_mark_price_ws_url,
     build_lightweight_chart_html,
     df_to_tv_series,
     markers_for_open_orders,
@@ -643,18 +640,6 @@ def _main_workstation(
             orders_df = list_paper_orders()
             markers.extend(markers_for_open_orders(orders_df, sym, candles))
 
-            ws_url = binance_kline_ws_url(sym, chart_tf, market) if use_live else ""
-            if use_live and market == "futures":
-                mark_url = binance_mark_price_ws_url(sym, market)
-                mark_note = None
-            elif market == "spot":
-                mark_url = ""
-                mark_note = "spot"
-            else:
-                mark_url = ""
-                mark_note = "offline"
-            agg_url = binance_agg_trade_ws_url(sym, market) if use_live else ""
-
             mkt_label = "永續" if market == "futures" else "現貨"
             ws_label = "WS" if use_live else "離線"
             title = f"{pair} · {chart_tf} · 高亮 {hi_name} · {mkt_label} · {ws_label}"
@@ -663,14 +648,19 @@ def _main_workstation(
                 candles=candles,
                 volumes=volumes,
                 markers=markers,
-                ws_url=ws_url,
                 title=title,
+                symbol=sym,
+                chart_interval=chart_tf,
+                market=market,
+                use_live=use_live,
                 chart_height=560,
-                mark_price_ws_url=mark_url,
-                mark_price_note=mark_note,
-                agg_trade_ws_url=agg_url,
             )
-            components.html(html_doc, height=640, scrolling=False)
+            components.html(
+                html_doc,
+                height=640,
+                scrolling=False,
+                key=f"tv_{sym}_{market}_{chart_tf}_{int(use_live)}",
+            )
 
             _signal_chips(raw, strategy_ids, chart_tf, chart_highlight)
 

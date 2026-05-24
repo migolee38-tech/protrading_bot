@@ -41,6 +41,19 @@ def binance_agg_trade_ws_url(symbol: str, market: MarketType) -> str:
     return f"wss://stream.binance.com:9443/ws/{s}@aggTrade"
 
 
+def binance_futures_stream_names(symbol: str, interval: str) -> list[str]:
+    """永續合併串流名稱（單一 WebSocket 承載 K 線 + aggTrade + markPrice）。"""
+    s = symbol.replace("/", "").lower()
+    iv = interval.strip().lower()
+    return [f"{s}@kline_{iv}", f"{s}@aggTrade", f"{s}@markPrice@1s"]
+
+
+def binance_futures_combined_stream_url(symbol: str, interval: str) -> str:
+    """永續：單一 WS 訂閱多串流（較不易被瀏覽器/防火牆擋下）。"""
+    streams = "/".join(binance_futures_stream_names(symbol, interval))
+    return f"wss://fstream.binance.com/stream?streams={streams}"
+
+
 def _time_sec(ts: Any) -> int:
     if hasattr(ts, "timestamp"):
         return int(ts.timestamp())
@@ -159,19 +172,62 @@ def build_lightweight_chart_html(
     candles: list[dict[str, Any]],
     volumes: list[dict[str, Any]],
     markers: list[dict[str, Any]],
-    ws_url: str,
     title: str,
+    symbol: str,
+    chart_interval: str,
+    market: MarketType = "futures",
+    use_live: bool = True,
     chart_height: int = 600,
+    ws_url: str = "",
     mark_price_ws_url: str = "",
     mark_price_note: str | None = None,
     agg_trade_ws_url: str = "",
 ) -> str:
     """產生可給 streamlit.components.v1.html 的完整 HTML 文件。"""
+    sym = symbol.replace("/", "").upper()
+
+    if use_live and market == "futures":
+        combined = binance_futures_combined_stream_url(sym, chart_interval)
+        sub_params = binance_futures_stream_names(sym, chart_interval)
+        ws_url = ""
+        mark_price_ws_url = ""
+        agg_trade_ws_url = ""
+        mark_price_note = None
+    elif use_live and market == "spot":
+        combined = ""
+        sub_params = []
+        if not ws_url:
+            ws_url = binance_kline_ws_url(sym, chart_interval, "spot")
+        if not agg_trade_ws_url:
+            agg_trade_ws_url = binance_agg_trade_ws_url(sym, "spot")
+        mark_price_ws_url = ""
+        mark_price_note = mark_price_note or "spot"
+    else:
+        combined = ""
+        sub_params = []
+        ws_url = ""
+        mark_price_ws_url = ""
+        agg_trade_ws_url = ""
+        mark_price_note = "offline"
+
+    # 永續 WS 全掛時，瀏覽器端 fallback 現貨 WS（僅即時參考）
+    spot_agg_fallback = (
+        binance_agg_trade_ws_url(sym, "spot") if market == "futures" else ""
+    )
+    spot_kline_fallback = (
+        binance_kline_ws_url(sym, chart_interval, "spot") if market == "futures" else ""
+    )
+
     boot = {
         "candles": candles,
         "volumes": volumes,
         "markers": markers,
+        "market": market,
         "wsUrl": ws_url,
+        "combinedFuturesUrl": combined if use_live and market == "futures" else "",
+        "futuresSubscribeParams": sub_params if use_live and market == "futures" else [],
+        "spotAggFallbackUrl": spot_agg_fallback,
+        "spotKlineFallbackUrl": spot_kline_fallback,
         "markPriceWsUrl": mark_price_ws_url,
         "markPriceNote": mark_price_note,
         "aggTradeWsUrl": agg_trade_ws_url,
@@ -275,7 +331,7 @@ def build_lightweight_chart_html(
 
   let markSeries = null;
   let lastTradeSeries = null;
-  if (BOOT.markPriceWsUrl) {{
+  if (BOOT.markPriceWsUrl || BOOT.combinedFuturesUrl) {{
     markSeries = chart.addLineSeries({{
       color: '#f0b90b',
       lineWidth: 2,
@@ -284,7 +340,7 @@ def build_lightweight_chart_html(
       title: 'Mark',
     }});
   }}
-  if (BOOT.aggTradeWsUrl) {{
+  if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl) {{
     lastTradeSeries = chart.addLineSeries({{
       color: '#29b6f6',
       lineWidth: 1,
@@ -293,7 +349,7 @@ def build_lightweight_chart_html(
       title: 'Last',
     }});
   }}
-  if (!BOOT.markPriceWsUrl) {{
+  if (!BOOT.markPriceWsUrl && !BOOT.combinedFuturesUrl) {{
     markPxEl.style.fontSize = '12px';
     markPxEl.style.fontWeight = '500';
     markPxEl.className = 'flat';
@@ -320,7 +376,7 @@ def build_lightweight_chart_html(
   if (BOOT.candles && BOOT.candles.length) {{
     const last = BOOT.candles[BOOT.candles.length - 1];
     lastBarTime = last.time;
-    if (BOOT.aggTradeWsUrl) {{
+    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl) {{
       currentBarOpen = last.open;
       currentBarHigh = last.high;
       currentBarLow = last.low;
@@ -366,10 +422,17 @@ def build_lightweight_chart_html(
   let aggOk = false;
   function statusLine() {{
     const parts = [];
-    if (BOOT.wsUrl) parts.push('K線 ' + (klineOk ? '✓' : '…'));
-    if (BOOT.markPriceWsUrl) parts.push('標記價 ' + (markOk ? '✓' : '…'));
-    if (BOOT.aggTradeWsUrl) parts.push('Agg ' + (aggOk ? '✓' : '…'));
-    if (!BOOT.wsUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
+    if (BOOT.wsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) {{
+      parts.push('K線 ' + (klineOk ? '✓' : '…'));
+    }}
+    if (BOOT.markPriceWsUrl || BOOT.combinedFuturesUrl) {{
+      parts.push('標記價 ' + (markOk ? '✓' : '…'));
+    }}
+    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) {{
+      parts.push('Agg ' + (aggOk ? '✓' : '…'));
+    }}
+    if (usingSpotFallback) parts.push('現貨備援');
+    if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
       st.textContent = '未設定 WebSocket（僅顯示歷史 K）';
       return;
     }}
@@ -388,9 +451,9 @@ def build_lightweight_chart_html(
     aggEventsThisSecond += 1;
   }}
   function startAggRateTimer() {{
-    if (aggStatTimer || !BOOT.aggTradeWsUrl) return;
+    if (aggStatTimer || (!BOOT.aggTradeWsUrl && !BOOT.combinedFuturesUrl)) return;
     aggStatTimer = setInterval(() => {{
-      if (BOOT.aggTradeWsUrl && aggOk) {{
+      if ((BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) && aggOk) {{
         aggRateEl.textContent = aggEventsThisSecond
           ? '(' + aggEventsThisSecond + ' agg/s)'
           : '';
@@ -412,7 +475,7 @@ def build_lightweight_chart_html(
       lastTradeSeries.update({{ time: lastBarTime, value: pendingTradePrice }});
     }}
     if (
-      BOOT.aggTradeWsUrl &&
+      (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) &&
       currentBarOpen != null &&
       currentBarHigh != null &&
       currentBarLow != null &&
@@ -441,6 +504,186 @@ def build_lightweight_chart_html(
   }}
 
   let closed = false;
+  let usingSpotFallback = false;
+  let futuresWsAttempt = 0;
+
+  function unwrapBinanceMsg(raw) {{
+    if (raw && raw.stream && raw.data) return raw.data;
+    return raw;
+  }}
+
+  function handleKlinePayload(k) {{
+    if (!k) return;
+    const time = Math.floor(k.t / 1000);
+    lastBarTime = time;
+    const candle = {{
+      time: time,
+      open: parseFloat(k.o),
+      high: parseFloat(k.h),
+      low: parseFloat(k.l),
+      close: parseFloat(k.c),
+    }};
+    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) {{
+      currentBarOpen = candle.open;
+      currentBarHigh = candle.high;
+      currentBarLow = candle.low;
+    }}
+    const up = candle.close >= candle.open;
+    const vol = {{
+      time: time,
+      value: parseFloat(k.v),
+      color: up ? '#26a69a96' : '#ef535096',
+    }};
+    candleSeries.update(candle);
+    volumeSeries.update(vol);
+    klineOk = true;
+    statusLine();
+  }}
+
+  function handleFuturesPayload(msg) {{
+    if (!msg || !msg.e) return;
+    if (msg.e === 'kline' && msg.k) {{
+      handleKlinePayload(msg.k);
+      return;
+    }}
+    if (msg.e === 'markPriceUpdate' && msg.p != null) {{
+      markOk = true;
+      setMarkDisplay(msg.p);
+      statusLine();
+      return;
+    }}
+    if (msg.e === 'aggTrade' && msg.p != null) {{
+      aggOk = true;
+      startAggRateTimer();
+      const px = parseFloat(msg.p);
+      queueAggTrade(px, !!msg.m);
+      statusLine();
+    }}
+  }}
+
+  function startSpotFallback() {{
+    if (closed || usingSpotFallback) return;
+    usingSpotFallback = true;
+    st.textContent = '永續 fstream 無法連線 · 暫用現貨 WS 顯示最新成交（僅參考）';
+    st.style.color = '#f0b90b';
+    if (BOOT.spotKlineFallbackUrl) connectKlineUrl(BOOT.spotKlineFallbackUrl);
+    if (BOOT.spotAggFallbackUrl) connectAggUrl(BOOT.spotAggFallbackUrl);
+  }}
+
+  function connectFuturesSubscribe() {{
+    if (closed || !BOOT.futuresSubscribeParams || !BOOT.futuresSubscribeParams.length) return;
+    futuresWsAttempt += 1;
+    const ws = new WebSocket('wss://fstream.binance.com/ws');
+    ws.onopen = () => {{
+      ws.send(JSON.stringify({{
+        method: 'SUBSCRIBE',
+        params: BOOT.futuresSubscribeParams,
+        id: 1,
+      }}));
+    }};
+    ws.onmessage = (ev) => {{
+      try {{
+        handleFuturesPayload(unwrapBinanceMsg(JSON.parse(ev.data)));
+      }} catch (e) {{}}
+    }};
+    ws.onerror = () => {{
+      if (!klineOk && !aggOk && futuresWsAttempt >= 2) startSpotFallback();
+    }};
+    ws.onclose = () => {{
+      klineOk = false;
+      markOk = false;
+      aggOk = false;
+      statusLine();
+      if (!closed && futuresWsAttempt < 2) {{
+        setTimeout(connectFuturesSubscribe, 3000);
+      }} else if (!closed && !klineOk && !aggOk) {{
+        startSpotFallback();
+      }}
+    }};
+    setTimeout(() => {{
+      if (!closed && !klineOk && !aggOk && !usingSpotFallback) startSpotFallback();
+    }}, 8000);
+  }}
+
+  function connectFuturesCombined() {{
+    if (closed || !BOOT.combinedFuturesUrl) return;
+    futuresWsAttempt += 1;
+    const ws = new WebSocket(BOOT.combinedFuturesUrl);
+    ws.onopen = () => {{ statusLine(); }};
+    ws.onmessage = (ev) => {{
+      try {{
+        handleFuturesPayload(unwrapBinanceMsg(JSON.parse(ev.data)));
+      }} catch (e) {{}}
+    }};
+    ws.onerror = () => {{
+      if (futuresWsAttempt < 2) {{
+        setTimeout(connectFuturesSubscribe, 500);
+      }} else {{
+        startSpotFallback();
+      }}
+    }};
+    ws.onclose = () => {{
+      klineOk = false;
+      markOk = false;
+      aggOk = false;
+      statusLine();
+      if (!closed && futuresWsAttempt < 2) {{
+        setTimeout(connectFuturesSubscribe, 2000);
+      }} else if (!closed && !usingSpotFallback) {{
+        startSpotFallback();
+      }}
+    }};
+    setTimeout(() => {{
+      if (!closed && !klineOk && !aggOk && !markOk && !usingSpotFallback) {{
+        try {{ ws.close(); }} catch (e) {{}}
+        connectFuturesSubscribe();
+      }}
+    }}, 6000);
+  }}
+
+  function connectKlineUrl(url) {{
+    if (!url || closed) return;
+    const ws = new WebSocket(url);
+    ws.onopen = () => {{ klineOk = true; statusLine(); }};
+    ws.onclose = () => {{
+      klineOk = false;
+      statusLine();
+      if (!closed && !usingSpotFallback) setTimeout(() => connectKlineUrl(url), 3000);
+    }};
+    ws.onerror = () => {{ klineOk = false; statusLine(); }};
+    ws.onmessage = (ev) => {{
+      try {{
+        const msg = JSON.parse(ev.data);
+        const k = msg.k;
+        if (!k) return;
+        handleKlinePayload(k);
+      }} catch (e) {{}}
+    }};
+  }}
+
+  function connectAggUrl(url) {{
+    if (!url || closed) return;
+    const ws = new WebSocket(url);
+    ws.onopen = () => {{
+      aggOk = true;
+      startAggRateTimer();
+      statusLine();
+    }};
+    ws.onclose = () => {{
+      aggOk = false;
+      statusLine();
+      aggRateEl.textContent = '';
+      if (!closed) setTimeout(() => connectAggUrl(url), 3000);
+    }};
+    ws.onerror = () => {{ aggOk = false; statusLine(); }};
+    ws.onmessage = (ev) => {{
+      try {{
+        const msg = unwrapBinanceMsg(JSON.parse(ev.data));
+        if (msg.e !== 'aggTrade' || msg.p == null) return;
+        queueAggTrade(parseFloat(msg.p), !!msg.m);
+      }} catch (e) {{}}
+    }};
+  }}
 
   function connectKline() {{
     if (!BOOT.wsUrl || closed) return;
@@ -455,30 +698,8 @@ def build_lightweight_chart_html(
     ws.onmessage = (ev) => {{
       try {{
         const msg = JSON.parse(ev.data);
-        const k = msg.k;
-        if (!k) return;
-        const time = Math.floor(k.t / 1000);
-        lastBarTime = time;
-        const candle = {{
-          time: time,
-          open: parseFloat(k.o),
-          high: parseFloat(k.h),
-          low: parseFloat(k.l),
-          close: parseFloat(k.c),
-        }};
-        if (BOOT.aggTradeWsUrl) {{
-          currentBarOpen = candle.open;
-          currentBarHigh = candle.high;
-          currentBarLow = candle.low;
-        }}
-        const up = candle.close >= candle.open;
-        const vol = {{
-          time: time,
-          value: parseFloat(k.v),
-          color: up ? '#26a69a96' : '#ef535096',
-        }};
-        candleSeries.update(candle);
-        volumeSeries.update(vol);
+        if (!msg.k) return;
+        handleKlinePayload(msg.k);
       }} catch (e) {{}}
     }};
   }}
@@ -528,16 +749,20 @@ def build_lightweight_chart_html(
     }};
   }}
 
-  if (!BOOT.wsUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
+  if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
     st.textContent = '未設定 WebSocket（僅顯示歷史 K）';
     tradePxEl.textContent = '（未連線）';
     return;
   }}
 
   statusLine();
-  if (BOOT.wsUrl) connectKline();
-  if (BOOT.markPriceWsUrl) connectMark();
-  if (BOOT.aggTradeWsUrl) connectAggTrade();
+  if (BOOT.combinedFuturesUrl) {{
+    connectFuturesCombined();
+  }} else {{
+    if (BOOT.wsUrl) connectKline();
+    if (BOOT.markPriceWsUrl) connectMark();
+    if (BOOT.aggTradeWsUrl) connectAggTrade();
+  }}
 }})();
 </script>
 </body></html>"""
