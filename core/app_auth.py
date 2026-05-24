@@ -10,7 +10,8 @@ import streamlit as st
 from dotenv import load_dotenv
 
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_ENV_PATH, override=False)
+# override=True：確保 .env 內的 APP_LOGIN_* 會覆蓋空的外部環境變數
+load_dotenv(_ENV_PATH, override=True)
 
 _SESSION_KEY = "_auth_ok"
 
@@ -21,12 +22,21 @@ def _env(key: str, default: str = "") -> str:
 
 
 def _secret_or_env(key: str, default: str = "") -> str:
+    """
+    優先使用環境變數（Zeabur Variables、本機 .env 經 dotenv 載入）。
+    僅在 secrets 有非空值時才採用 st.secrets，避免空 secrets 蓋掉 Zeabur 設定。
+    """
+    env_val = _env(key, default)
+    if env_val:
+        return env_val
     try:
         if key in st.secrets:
-            return str(st.secrets[key]).strip()
+            secret_val = str(st.secrets[key]).strip()
+            if secret_val:
+                return secret_val
     except Exception:
         pass
-    return _env(key, default)
+    return default
 
 
 def auth_is_enabled() -> bool:

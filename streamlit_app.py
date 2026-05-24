@@ -15,6 +15,10 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+
 # Streamlit Cloud（Linux）預設 locale 有時非 UTF-8，避免中文讀寫異常
 os.environ.setdefault("LANG", "C.UTF-8")
 os.environ.setdefault("LC_ALL", "C.UTF-8")
@@ -774,11 +778,20 @@ def main() -> None:
         st.stop()
     _init_state()
     if not auth_is_enabled():
-        st.sidebar.warning(
-            "未設定 APP_LOGIN_PASSWORD，站台未啟用登入保護。"
-            "正式環境請於 Zeabur Variables 或本機 .env 設定。",
-            icon="⚠️",
-        )
+        on_zeabur = bool(os.environ.get("ZEABUR") or os.environ.get("ZEABUR_ENV_ID"))
+        if on_zeabur:
+            st.sidebar.error(
+                "Zeabur 未讀到 `APP_LOGIN_PASSWORD`。"
+                "請在**此服務** Variables 新增 Key 為 `APP_LOGIN_PASSWORD`（全大寫、底線），"
+                "儲存後 **Redeploy**，並確認最新 Deployment 為 **Running**。",
+                icon="🔒",
+            )
+        else:
+            st.sidebar.warning(
+                "未設定 APP_LOGIN_PASSWORD，站台未啟用登入保護。"
+                "正式環境請於 Zeabur Variables 或本機 .env 設定。",
+                icon="⚠️",
+            )
     st.title("📈 量化交易工作站")
 
     market: MarketType = st.session_state.market

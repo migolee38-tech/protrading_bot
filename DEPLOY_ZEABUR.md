@@ -114,6 +114,9 @@ docker run --rm -p 8501:8501 -e PORT=8501 protrading-bot
 | 仍 451 | 確認區域為新加坡；Logs 是否仍打 `fapi.binance.com` 失敗 |
 | 更新程式 | `git push` 後 Zeabur 通常自動重新部署 |
 | 想加密碼保護 | Variables 設 `APP_LOGIN_PASSWORD`（不需升級 Zeabur） |
+| 已設密碼仍無登入 | Key 須為 `APP_LOGIN_PASSWORD`（勿用空格或 `app login password`）；Save 後 **Redeploy** |
+| 最新 Deployment 非 Running | 點開該次部署看 **Logs** 修錯；修復前可能仍連到舊版且無新變數 |
+| 側欄黃色／紅色登入提示 | 容器內未讀到變數 → 確認變數在**本 Streamlit 服務**而非僅 Project |
 | 登入後仍被踢出 | 多開分頁正常；清除 Cookie 需重新登入 |
 
 ---
