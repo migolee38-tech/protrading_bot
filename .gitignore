@@ -1,0 +1,9 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+state.json
+data/cache/
+data/reports/
+data/paper_orders.json
