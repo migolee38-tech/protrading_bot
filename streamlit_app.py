@@ -24,6 +24,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+from core.app_auth import auth_is_enabled, render_login_gate, render_logout_control
 from core.backtest_report import run_backtest
 from core.lightweight_tv import (
     build_lightweight_chart_html,
@@ -199,6 +200,7 @@ def _strategy_order_hints(
 
 def _sidebar_panel(market: MarketType) -> tuple[int, int, pd.DataFrame]:
     """側欄由上而下：Top 100 表 → 成交量滑桿 → K 線根數滑桿。"""
+    render_logout_control()
     st.sidebar.markdown("### 📊 Top 100")
 
     top_n_cur = int(st.session_state.get("sidebar_top_n", 100))
@@ -768,7 +770,15 @@ def _show_binance_source_banner() -> None:
 
 
 def main() -> None:
+    if not render_login_gate():
+        st.stop()
     _init_state()
+    if not auth_is_enabled():
+        st.sidebar.warning(
+            "未設定 APP_LOGIN_PASSWORD，站台未啟用登入保護。"
+            "正式環境請於 Zeabur Variables 或本機 .env 設定。",
+            icon="⚠️",
+        )
     st.title("📈 量化交易工作站")
 
     market: MarketType = st.session_state.market

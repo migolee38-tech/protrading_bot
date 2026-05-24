@@ -43,19 +43,28 @@ git push
 
 ---
 
-## 步驟 3：環境變數（選用）
+## 步驟 3：環境變數（Zeabur → Variables）
+
+### 登入密碼（建議必設，無需升級 Zeabur 方案）
+
+| 變數 | 說明 |
+|------|------|
+| `APP_LOGIN_PASSWORD` | **登入密碼**（設了即啟用密碼牆；勿提交 Git） |
+| `APP_LOGIN_USER` | 登入帳號（選用，預設 `admin`） |
+
+未設定 `APP_LOGIN_PASSWORD` 時，網站**不會**要求登入（僅適合本機測試）。
+
+### 幣安 API（選用）
 
 僅 **實盤下單** 需要；公開行情、回測、模擬下單不需 API。
-
-在 Zeabur 服務 → **Variables**：
 
 | 變數 | 說明 |
 |------|------|
 | `BINANCE_API_KEY` | 幣安 API Key |
 | `BINANCE_API_SECRET` | 幣安 API Secret |
-| `BINANCE_STRICT_FUTURES` | 設為 `1` 時，永續模式**僅**用 `fapi.binance.com`，不 fallback 現貨（建議亞洲主機） |
+| `BINANCE_STRICT_FUTURES` | 設為 `1` 時，永續模式**僅**用 `fapi.binance.com` |
 
-（與本機 `.env`、`.streamlit/secrets.toml.example` 相同欄位名。）
+本機可把上述變數寫入 `.env`（已在 `.gitignore`）；Zeabur 請只用 **Variables**。
 
 ---
 
@@ -104,6 +113,8 @@ docker run --rm -p 8501:8501 -e PORT=8501 protrading-bot
 | 中文方塊 | 確認映像含 `fonts-noto-cjk`（本 Dockerfile 已含） |
 | 仍 451 | 確認區域為新加坡；Logs 是否仍打 `fapi.binance.com` 失敗 |
 | 更新程式 | `git push` 後 Zeabur 通常自動重新部署 |
+| 想加密碼保護 | Variables 設 `APP_LOGIN_PASSWORD`（不需升級 Zeabur） |
+| 登入後仍被踢出 | 多開分頁正常；清除 Cookie 需重新登入 |
 
 ---
 
@@ -113,5 +124,6 @@ docker run --rm -p 8501:8501 -e PORT=8501 protrading-bot
 |------|------|
 | `Dockerfile` | Zeabur 建置與啟動 Streamlit |
 | `.dockerignore` | 排除 `.venv`、`.env`、`data/cache` 等 |
+| `core/app_auth.py` | 登入閘道（`APP_LOGIN_*` 環境變數） |
 | `streamlit_app.py` | 應用進入點 |
 | `requirements.txt` | Python 依賴 |
