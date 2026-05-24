@@ -34,7 +34,7 @@ from core.lightweight_tv import (
     markers_for_open_orders,
     markers_for_strategies,
 )
-from core.market_data import MarketType, pop_source_note
+from core.market_data import MarketType, fetch_klines, pop_source_note
 from core.order_executor import (
     OrderMode,
     OrderRequest,
