@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Streamlit Cloud（Linux）預設 locale 有時非 UTF-8，避免中文讀寫異常
@@ -31,7 +31,7 @@ from core.lightweight_tv import (
     markers_for_open_orders,
     markers_for_strategies,
 )
-from core.market_data import MarketType, fetch_klines, pop_source_note
+from core.market_data import MarketType, fetch_klines, fetch_symbol_last_price, pop_source_note
 from core.order_executor import (
     OrderMode,
     OrderRequest,
@@ -107,6 +107,7 @@ def _cached_klines(
 
 
 def _last_price(sym: str, universe_df: pd.DataFrame, market: MarketType) -> float:
+    """靜態 fallback（榜單快取或 K 線收盤）。"""
     if not universe_df.empty and "symbol" in universe_df.columns:
         row = universe_df[universe_df["symbol"] == sym]
         if not row.empty and "last_price" in row.columns:
@@ -116,6 +117,26 @@ def _last_price(sym: str, universe_df: pd.DataFrame, market: MarketType) -> floa
         return float(raw.iloc[-1]["close"])
     except Exception:
         return 0.0
+
+
+@st.cache_data(ttl=1)
+def _live_ticker_price(sym: str, market: str) -> float:
+    return fetch_symbol_last_price(sym, market)  # type: ignore[arg-type]
+
+
+@st.fragment(run_every=timedelta(seconds=1))
+def _order_live_price_metric(sym: str, pair: str, market: MarketType) -> float:
+    """右欄下單區：約每秒 REST 拉最新價（永續 fapi / 現貨）。"""
+    px = _live_ticker_price(sym, market)
+    mkt = "永續" if market == "futures" else "現貨"
+    if px > 0:
+        st.metric("最新價", f"{px:,.6g}")
+        st.caption(f"即時更新 · {mkt} · 約 1 秒")
+    else:
+        st.metric("最新價", "—")
+        st.caption(f"報價暫不可用 · {mkt}")
+    st.session_state["order_live_last_px"] = px
+    return px
 
 
 def _dataframe_row_selection(row_index: int) -> dict:
@@ -391,12 +412,13 @@ def _order_right_panel(
 ) -> None:
     sym = st.session_state.selected_symbol
     pair = st.session_state.selected_pair
-    last_px = _last_price(sym, universe_df, market)
 
     st.markdown("##### 下單")
     st.caption(pair)
-    if last_px > 0:
-        st.metric("最新價", f"{last_px:,.6g}")
+    live_px = _order_live_price_metric(sym, pair, market)
+    last_px = live_px if live_px > 0 else _last_price(sym, universe_df, market)
+    if live_px <= 0 and last_px > 0:
+        st.caption(f"榜單參考價 {last_px:,.6g}（即時報價未取得）")
 
     st.session_state.paper_enabled = st.toggle(
         "啟用模擬開單",
@@ -487,7 +509,8 @@ def _order_right_panel(
         )
         if order_type == "market":
             st.caption("市價單以最新價成交（模擬記錄用目前最新價）")
-            price = last_px if last_px > 0 else float(st.session_state.get("order_price_input", price))
+            fill_px = float(st.session_state.get("order_live_last_px", 0) or last_px)
+            price = fill_px if fill_px > 0 else float(st.session_state.get("order_price_input", price))
 
         qty = st.number_input(
             "數量（幣）",

@@ -238,6 +238,43 @@ def fetch_ticker_24h(market: MarketType = "futures") -> tuple[list[dict], PriceS
     raise BinanceAPIError(str(last_exc) if last_exc else "ticker/24hr unavailable")
 
 
+def fetch_symbol_last_price(symbol: str, market: MarketType = "futures") -> float:
+    """單一交易對最新成交價（REST）；永續優先 fapi/v1/ticker/price。"""
+    sym = symbol.replace("/", "").upper()
+    params = {"symbol": sym}
+
+    if market == "futures":
+        candidates = [
+            (f"{FUTURES_BASE}/fapi/v1/ticker/price", params),
+        ]
+        if not strict_futures_only():
+            candidates.extend(
+                [
+                    (f"{SPOT_BASE}/api/v3/ticker/price", params),
+                    (f"{SPOT_MIRROR_BASE}/api/v3/ticker/price", params),
+                ]
+            )
+    else:
+        candidates = [
+            (f"{SPOT_BASE}/api/v3/ticker/price", params),
+            (f"{SPOT_MIRROR_BASE}/api/v3/ticker/price", params),
+        ]
+
+    for url, p in candidates:
+        try:
+            resp = requests.get(url, params=p, timeout=10)
+            if resp.status_code in (451, 403, 418):
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            price = float(data.get("price", 0) or 0)
+            if price > 0:
+                return price
+        except (requests.RequestException, TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def symbol_display(binance_symbol: str) -> str:
     """BTCUSDT -> BTC/USDT"""
     s = binance_symbol.upper()
