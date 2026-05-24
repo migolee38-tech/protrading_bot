@@ -766,3 +766,115 @@ def build_lightweight_chart_html(
 }})();
 </script>
 </body></html>"""
+
+
+def build_order_panel_live_price_html(
+    symbol: str,
+    market: MarketType = "futures",
+) -> str:
+    """右欄下單區：與 K 線圖相同 @aggTrade WebSocket，即時最新成交價。"""
+    sym = symbol.replace("/", "").upper()
+    mkt_label = "永續" if market == "futures" else "現貨"
+    agg_url = binance_agg_trade_ws_url(sym, market)
+    spot_agg = binance_agg_trade_ws_url(sym, "spot") if market == "futures" else ""
+
+    boot = {
+        "symbol": sym,
+        "market": market,
+        "aggTradeWsUrl": agg_url,
+        "spotAggFallbackUrl": spot_agg,
+        "mktLabel": mkt_label,
+    }
+    boot_json = json.dumps(boot, ensure_ascii=False)
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<style>
+  html, body {{
+    margin: 0; padding: 0; background: transparent;
+    font-family: "Noto Sans CJK TC", "Noto Sans TC", system-ui, sans-serif;
+    color: #fafafa;
+  }}
+  #wrap {{ padding: 2px 4px 0; }}
+  .lbl {{ font-size: 0.82rem; color: #a3a8b8; margin-bottom: 2px; }}
+  #px {{
+    font-size: 1.55rem; font-weight: 700; font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em; line-height: 1.2;
+  }}
+  #px.buy {{ color: #26a69a; }}
+  #px.sell {{ color: #ef5350; }}
+  #px.flat {{ color: #fafafa; }}
+  #sub {{ font-size: 0.72rem; color: #787b86; margin-top: 2px; }}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div class="lbl">最新價</div>
+  <div id="px" class="flat">—</div>
+  <div id="sub">aggTrade 連線中…</div>
+</div>
+<script>
+(function() {{
+  const BOOT = {boot_json};
+  const pxEl = document.getElementById('px');
+  const subEl = document.getElementById('sub');
+
+  function formatPx(p) {{
+    const n = parseFloat(p);
+    if (!isFinite(n)) return '—';
+    const a = Math.abs(n);
+    const d = a >= 1 ? 4 : a >= 0.01 ? 6 : 8;
+    return n.toLocaleString('en-US', {{ minimumFractionDigits: 2, maximumFractionDigits: d }});
+  }}
+
+  let closed = false;
+  let usingSpot = false;
+  let gotTick = false;
+
+  function onAgg(px, buyerMaker) {{
+    gotTick = true;
+    pxEl.textContent = formatPx(px);
+    pxEl.className = buyerMaker ? 'sell' : 'buy';
+    subEl.textContent = (usingSpot ? '現貨 WS 備援 · ' : '') + BOOT.mktLabel + ' · aggTrade · 與圖同步';
+    subEl.style.color = '#26a69a';
+  }}
+
+  function connectAgg(url, isFallback) {{
+    if (!url || closed) return null;
+    const ws = new WebSocket(url);
+    ws.onopen = () => {{
+      usingSpot = !!isFallback;
+      subEl.textContent = (usingSpot ? '現貨 WS 備援 · ' : '') + 'aggTrade 已連線';
+      subEl.style.color = '#787b86';
+    }};
+    ws.onmessage = (ev) => {{
+      try {{
+        const raw = JSON.parse(ev.data);
+        const msg = raw.stream && raw.data ? raw.data : raw;
+        if (msg.e !== 'aggTrade' || msg.p == null) return;
+        onAgg(parseFloat(msg.p), !!msg.m);
+      }} catch (e) {{}}
+    }};
+    ws.onerror = () => {{
+      subEl.textContent = 'aggTrade 連線失敗';
+      subEl.style.color = '#ef5350';
+    }};
+    ws.onclose = () => {{
+      if (!closed) setTimeout(() => connectAgg(url, isFallback), 2500);
+    }};
+    return ws;
+  }}
+
+  let mainWs = connectAgg(BOOT.aggTradeWsUrl, false);
+  setTimeout(() => {{
+    if (closed || gotTick) return;
+    if (BOOT.spotAggFallbackUrl && BOOT.market === 'futures') {{
+      try {{ if (mainWs) mainWs.close(); }} catch (e) {{}}
+      connectAgg(BOOT.spotAggFallbackUrl, true);
+    }}
+  }}, 4000);
+
+  window.addEventListener('beforeunload', () => {{ closed = true; }});
+}})();
+</script>
+</body></html>"""

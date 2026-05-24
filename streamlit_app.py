@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Streamlit Cloud（Linux）預設 locale 有時非 UTF-8，避免中文讀寫異常
@@ -27,6 +27,7 @@ import streamlit.components.v1 as components
 from core.backtest_report import run_backtest
 from core.lightweight_tv import (
     build_lightweight_chart_html,
+    build_order_panel_live_price_html,
     df_to_tv_series,
     markers_for_open_orders,
     markers_for_strategies,
@@ -117,26 +118,6 @@ def _last_price(sym: str, universe_df: pd.DataFrame, market: MarketType) -> floa
         return float(raw.iloc[-1]["close"])
     except Exception:
         return 0.0
-
-
-@st.cache_data(ttl=1)
-def _live_ticker_price(sym: str, market: str) -> float:
-    return fetch_symbol_last_price(sym, market)  # type: ignore[arg-type]
-
-
-@st.fragment(run_every=timedelta(seconds=1))
-def _order_live_price_metric(sym: str, pair: str, market: MarketType) -> float:
-    """右欄下單區：約每秒 REST 拉最新價（永續 fapi / 現貨）。"""
-    px = _live_ticker_price(sym, market)
-    mkt = "永續" if market == "futures" else "現貨"
-    if px > 0:
-        st.metric("最新價", f"{px:,.6g}")
-        st.caption(f"即時更新 · {mkt} · 約 1 秒")
-    else:
-        st.metric("最新價", "—")
-        st.caption(f"報價暫不可用 · {mkt}")
-    st.session_state["order_live_last_px"] = px
-    return px
 
 
 def _dataframe_row_selection(row_index: int) -> dict:
@@ -409,16 +390,25 @@ def _order_right_panel(
     market: MarketType,
     universe_df: pd.DataFrame,
     chart_highlight: str,
+    use_live: bool,
 ) -> None:
     sym = st.session_state.selected_symbol
     pair = st.session_state.selected_pair
+    last_px = _last_price(sym, universe_df, market)
 
     st.markdown("##### 下單")
     st.caption(pair)
-    live_px = _order_live_price_metric(sym, pair, market)
-    last_px = live_px if live_px > 0 else _last_price(sym, universe_df, market)
-    if live_px <= 0 and last_px > 0:
-        st.caption(f"榜單參考價 {last_px:,.6g}（即時報價未取得）")
+    if use_live:
+        components.html(
+            build_order_panel_live_price_html(sym, market),
+            height=88,
+            scrolling=False,
+        )
+    elif last_px > 0:
+        st.metric("最新價", f"{last_px:,.6g}")
+        st.caption("離線／未啟用 WS · 榜單參考價")
+    else:
+        st.metric("最新價", "—")
 
     st.session_state.paper_enabled = st.toggle(
         "啟用模擬開單",
@@ -509,7 +499,9 @@ def _order_right_panel(
         )
         if order_type == "market":
             st.caption("市價單以最新價成交（模擬記錄用目前最新價）")
-            fill_px = float(st.session_state.get("order_live_last_px", 0) or last_px)
+            fill_px = fetch_symbol_last_price(sym, market)
+            if fill_px <= 0:
+                fill_px = last_px
             price = fill_px if fill_px > 0 else float(st.session_state.get("order_price_input", price))
 
         qty = st.number_input(
@@ -644,7 +636,7 @@ def _main_workstation(
     col_chart, col_orders = st.columns([2.55, 1.15], gap="medium")
 
     with col_orders:
-        _order_right_panel(strategy_ids, market, universe_df, chart_highlight)
+        _order_right_panel(strategy_ids, market, universe_df, chart_highlight, use_live)
 
     with col_chart:
         try:
