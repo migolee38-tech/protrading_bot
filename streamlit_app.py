@@ -655,12 +655,7 @@ def _main_workstation(
                 use_live=use_live,
                 chart_height=560,
             )
-            components.html(
-                html_doc,
-                height=640,
-                scrolling=False,
-                key=f"tv_{sym}_{market}_{chart_tf}_{int(use_live)}",
-            )
+            components.html(html_doc, height=640, scrolling=False)
 
             _signal_chips(raw, strategy_ids, chart_tf, chart_highlight)
 
