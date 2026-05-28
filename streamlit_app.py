@@ -112,6 +112,34 @@ def _cached_klines(
     return df, src
 
 
+def _klines_for_chart(
+    symbol: str,
+    interval: str,
+    limit: int,
+    market: MarketType,
+    *,
+    live_futures_server: bool,
+) -> tuple[pd.DataFrame, str]:
+    """永續即時模式由伺服器輪詢 fapi（Zeabur 可用）；其餘走快取。"""
+    if live_futures_server:
+        df = fetch_klines(symbol, interval=interval, limit=limit, market=market)
+        return df, str(df.attrs.get("price_source", market))
+    return _cached_klines(symbol, interval, limit, market)  # type: ignore[arg-type]
+
+
+@st.fragment(run_every=1)
+def _futures_live_price_metric(sym: str, market: MarketType) -> float:
+    """下單區：伺服器直連 fapi 最新價（不依賴瀏覽器 fstream WS）。"""
+    px = fetch_symbol_last_price(sym, market)
+    if px > 0:
+        st.metric("最新價", f"{px:,.6g}")
+        st.caption("Binance 永續 fapi · 伺服器 REST · 與 TV BINANCE:xxxUSDT.P 同類")
+    else:
+        st.metric("最新價", "—")
+        st.caption("fapi 暫時無法取得價格")
+    return px
+
+
 def _last_price(sym: str, universe_df: pd.DataFrame, market: MarketType) -> float:
     """靜態 fallback（榜單快取或 K 線收盤）。"""
     if not universe_df.empty and "symbol" in universe_df.columns:
@@ -411,19 +439,14 @@ def _order_right_panel(
 
     st.markdown("##### 下單")
     st.caption(pair)
-    if use_live:
+    if use_live and market == "futures":
+        _futures_live_price_metric(sym, market)
+    elif use_live:
         components.html(
             build_order_panel_live_price_html(sym, market),
             height=88,
             scrolling=False,
         )
-        if market == "futures":
-            rest_px = fetch_symbol_last_price(sym, market)
-            if rest_px > 0:
-                st.caption(
-                    f"永續 REST（fapi）參考價 **{rest_px:,.6g}** — "
-                    "若上方 WS 顯示未收到成交，可先參考此價（與 TV USDT.P 同源類型）"
-                )
     elif last_px > 0:
         st.metric("最新價", f"{last_px:,.6g}")
         st.caption("離線／未啟用 WS · 榜單參考價")
@@ -636,6 +659,100 @@ def _order_right_panel(
     st.dataframe(show[cols_pref] if cols_pref else show, use_container_width=True, height=240)
 
 
+def _render_chart_block(
+    sym: str,
+    pair: str,
+    chart_tf: str,
+    kline_limit: int,
+    market: MarketType,
+    use_live: bool,
+    chart_highlight: str,
+    strategy_ids: list[str],
+    hi_name: str,
+    *,
+    live_futures_server: bool,
+) -> pd.DataFrame:
+    """繪製 K 線圖；live_futures_server 時由伺服器刷新 fapi，不用瀏覽器 fstream。"""
+    raw, k_src = _klines_for_chart(
+        sym, chart_tf, kline_limit, market, live_futures_server=live_futures_server
+    )
+    if market == "futures" and k_src and k_src != "futures":
+        st.warning(
+            f"歷史 K 線來源為「{k_src}」，非永續 fapi；與合約即時價可能不一致。",
+            icon="⚠️",
+        )
+    candles, volumes = df_to_tv_series(raw)
+    markers: list[dict] = []
+    if STRATEGIES[chart_highlight].timeframe == chart_tf:
+        prep_hi = STRATEGIES[chart_highlight].prepare_df(raw)
+        markers = markers_for_strategies(prep_hi, [chart_highlight])
+    orders_df = list_paper_orders()
+    markers.extend(markers_for_open_orders(orders_df, sym, candles))
+
+    mkt_label = "永續" if market == "futures" else "現貨"
+    if live_futures_server:
+        ws_label = "fapi 輪詢"
+    else:
+        ws_label = "WS" if use_live else "離線"
+    title = f"{pair} · {chart_tf} · 高亮 {hi_name} · {mkt_label} · {ws_label}"
+
+    browser_ws = use_live and market != "futures"
+    html_doc = build_lightweight_chart_html(
+        candles=candles,
+        volumes=volumes,
+        markers=markers,
+        title=title,
+        symbol=sym,
+        chart_interval=chart_tf,
+        market=market,
+        use_live=browser_ws,
+        chart_height=560,
+    )
+    components.html(html_doc, height=640, scrolling=False)
+    if live_futures_server:
+        st.caption(
+            "永續即時：伺服器每 2 秒更新 fapi K 線與收盤價"
+            "（瀏覽器無法連 fstream 時改走此路徑，與 TV USDT.P 同源）"
+        )
+    return raw
+
+
+@st.fragment(run_every=2)
+def _futures_live_chart_block(
+    sym: str,
+    pair: str,
+    chart_tf: str,
+    kline_limit: int,
+    market: MarketType,
+    use_live: bool,
+    chart_highlight: str,
+    strategy_ids: list[str],
+    hi_name: str,
+) -> None:
+    try:
+        raw = _render_chart_block(
+            sym,
+            pair,
+            chart_tf,
+            kline_limit,
+            market,
+            use_live,
+            chart_highlight,
+            strategy_ids,
+            hi_name,
+            live_futures_server=True,
+        )
+        _signal_chips(raw, strategy_ids, chart_tf, chart_highlight)
+        if STRATEGIES[chart_highlight].timeframe != chart_tf:
+            st.caption(
+                f"圖表週期 {chart_tf} 與高亮策略週期 {STRATEGIES[chart_highlight].timeframe} 不同，"
+                "箭頭仍依圖表週期資料計算（可能與策略預期週期不一致）。"
+            )
+    except Exception as exc:
+        _show_binance_source_banner()
+        st.error(f"無法載入圖表：{exc}")
+
+
 def _main_workstation(
     strategy_ids: list[str],
     chart_highlight: str,
@@ -659,54 +776,45 @@ def _main_workstation(
         _order_right_panel(strategy_ids, market, universe_df, chart_highlight, use_live)
 
     with col_chart:
-        try:
-            raw, k_src = _cached_klines(sym, chart_tf, kline_limit, market)
-            if market == "futures" and k_src and k_src != "futures":
-                st.warning(
-                    f"歷史 K 線來源為「{k_src}」，非永續 fapi；"
-                    "與合約即時價可能不一致。",
-                    icon="⚠️",
-                )
-            candles, volumes = df_to_tv_series(raw)
-            markers: list[dict] = []
-            if STRATEGIES[chart_highlight].timeframe == chart_tf:
-                prep_hi = STRATEGIES[chart_highlight].prepare_df(raw)
-                markers = markers_for_strategies(prep_hi, [chart_highlight])
-            orders_df = list_paper_orders()
-            markers.extend(markers_for_open_orders(orders_df, sym, candles))
-
-            mkt_label = "永續" if market == "futures" else "現貨"
-            ws_label = "WS" if use_live else "離線"
-            title = f"{pair} · {chart_tf} · 高亮 {hi_name} · {mkt_label} · {ws_label}"
-
-            html_doc = build_lightweight_chart_html(
-                candles=candles,
-                volumes=volumes,
-                markers=markers,
-                title=title,
-                symbol=sym,
-                chart_interval=chart_tf,
-                market=market,
-                use_live=use_live,
-                chart_height=560,
+        if use_live and market == "futures":
+            _futures_live_chart_block(
+                sym,
+                pair,
+                chart_tf,
+                kline_limit,
+                market,
+                use_live,
+                chart_highlight,
+                strategy_ids,
+                hi_name,
             )
-            components.html(html_doc, height=640, scrolling=False)
-
-            _signal_chips(raw, strategy_ids, chart_tf, chart_highlight)
-
-            if STRATEGIES[chart_highlight].timeframe != chart_tf:
-                st.caption(
-                    f"圖表週期 {chart_tf} 與高亮策略週期 {STRATEGIES[chart_highlight].timeframe} 不同，"
-                    "箭頭仍依圖表週期資料計算（可能與策略預期週期不一致）。"
+        else:
+            try:
+                raw = _render_chart_block(
+                    sym,
+                    pair,
+                    chart_tf,
+                    kline_limit,
+                    market,
+                    use_live,
+                    chart_highlight,
+                    strategy_ids,
+                    hi_name,
+                    live_futures_server=False,
                 )
-
-        except Exception as exc:
-            _show_binance_source_banner()
-            st.error(
-                f"無法載入圖表：{exc}\n\n"
-                "Streamlit Cloud 伺服器若無法連幣安，請在頂部改選「現貨」或稍後重試；"
-                "即時 WebSocket 仍由你的瀏覽器直連幣安。"
-            )
+                _signal_chips(raw, strategy_ids, chart_tf, chart_highlight)
+                if STRATEGIES[chart_highlight].timeframe != chart_tf:
+                    st.caption(
+                        f"圖表週期 {chart_tf} 與高亮策略週期 "
+                        f"{STRATEGIES[chart_highlight].timeframe} 不同，"
+                        "箭頭仍依圖表週期資料計算（可能與策略預期週期不一致）。"
+                    )
+            except Exception as exc:
+                _show_binance_source_banner()
+                st.error(
+                    f"無法載入圖表：{exc}\n\n"
+                    "若無法連幣安，請改選「現貨」或稍後重試。"
+                )
 
 
 def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int) -> None:
