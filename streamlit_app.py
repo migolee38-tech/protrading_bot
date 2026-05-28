@@ -65,6 +65,16 @@ _CJK_FONT_CSS = """
     font-family: "Noto Sans CJK TC", "Noto Sans TC", "PingFang TC",
       "Microsoft JhengHei", "Heiti TC", sans-serif !important;
   }
+  /* 頂部工具列 sticky：跨分頁保持可見 */
+  div[data-testid="stVerticalBlock"] > div:has(#sticky-toolbar-anchor) {
+    position: sticky;
+    top: 0.5rem;
+    z-index: 30;
+    background: var(--background-color);
+    padding: 0.35rem 0 0.25rem 0;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+    margin-bottom: 0.25rem;
+  }
 </style>
 """
 st.markdown(_CJK_FONT_CSS, unsafe_allow_html=True)
@@ -356,6 +366,17 @@ def _top_toolbar(universe_df: pd.DataFrame) -> tuple[list[str], str, str, Market
 
     sym = st.session_state.selected_symbol
     return strategy_ids, chart_highlight, sym, market, chart_tf, use_live
+
+
+def _sticky_top_toolbar(
+    universe_df: pd.DataFrame,
+) -> tuple[list[str], str, str, MarketType, str, bool]:
+    container = st.container()
+    with container:
+        st.markdown("<span id='sticky-toolbar-anchor'></span>", unsafe_allow_html=True)
+        st.caption("頂部多選策略監控 · 圖表僅高亮單一策略 · 右欄下單 · 側欄 Top 榜")
+        toolbar_state = _top_toolbar(universe_df)
+    return toolbar_state
 
 
 def _signal_chips(
@@ -796,13 +817,14 @@ def main() -> None:
 
     market: MarketType = st.session_state.market
     kline_limit, top_n, universe_df = _sidebar_panel(market)
+    strategy_ids, chart_highlight, sym, market, chart_tf, use_live = _sticky_top_toolbar(
+        universe_df
+    )
+    st.session_state.market = market
 
     tab_main, tab_bt, tab_fills = st.tabs(["主工作站", "回測覆盤", "模擬成交"])
 
     with tab_main:
-        st.caption("頂部多選策略監控 · 圖表僅高亮單一策略 · 右欄下單 · 側欄 Top 榜")
-        strategy_ids, chart_highlight, sym, market, chart_tf, use_live = _top_toolbar(universe_df)
-        st.session_state.market = market
         st.markdown("---")
         _main_workstation(
             strategy_ids,
