@@ -76,6 +76,21 @@ def strict_futures_only() -> bool:
     )
 
 
+def allow_spot_ws_fallback() -> bool:
+    """
+    永續模式是否允許瀏覽器 WebSocket 改連現貨 stream.binance.com。
+    預設關閉（避免畫面標永續、實際卻是現貨價）；僅在明確設
+    BINANCE_ALLOW_SPOT_WS_FALLBACK=1 時啟用（例如美國主機無法連 fstream）。
+    """
+    if strict_futures_only():
+        return False
+    return os.environ.get("BINANCE_ALLOW_SPOT_WS_FALLBACK", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def pop_source_note() -> str | None:
     global _source_notes
     if not _source_notes:

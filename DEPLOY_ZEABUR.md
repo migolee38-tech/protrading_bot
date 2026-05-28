@@ -62,7 +62,8 @@ git push
 |------|------|
 | `BINANCE_API_KEY` | 幣安 API Key |
 | `BINANCE_API_SECRET` | 幣安 API Secret |
-| `BINANCE_STRICT_FUTURES` | 設為 `1` 時，永續模式**僅**用 `fapi.binance.com` |
+| `BINANCE_STRICT_FUTURES` | 設為 `1` 時，永續模式**僅**用 `fapi.binance.com`（REST），且關閉現貨 WS 備援 |
+| `BINANCE_ALLOW_SPOT_WS_FALLBACK` | 設為 `1` 才允許永續 WS 失敗時改連 `stream.binance.com`（預設**關閉**） |
 
 本機可把上述變數寫入 `.env`（已在 `.gitignore`）；Zeabur 請只用 **Variables**。
 
@@ -117,6 +118,7 @@ docker run --rm -p 8501:8501 -e PORT=8501 protrading-bot
 | 已設密碼仍無登入 | Key 須為 `APP_LOGIN_PASSWORD`（勿用空格或 `app login password`）；Save 後 **Redeploy** |
 | 最新 Deployment 非 Running | 點開該次部署看 **Logs** 修錯；修復前可能仍連到舊版且無新變數 |
 | 側欄黃色／紅色登入提示 | 容器內未讀到變數 → 確認變數在**本 Streamlit 服務**而非僅 Project |
+| 價格像現貨不像永續 | F12→WS 若為 `stream.binance.com` 表示走了現貨備援；設 `BINANCE_STRICT_FUTURES=1` 且**不要**開 `BINANCE_ALLOW_SPOT_WS_FALLBACK` |
 | 登入後仍被踢出 | 多開分頁正常；清除 Cookie 需重新登入 |
 
 ---

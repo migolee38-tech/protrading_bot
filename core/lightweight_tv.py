@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from core.market_data import MarketType
+from core.market_data import MarketType, allow_spot_ws_fallback
 
 
 def binance_kline_ws_url(symbol: str, interval: str, market: MarketType) -> str:
@@ -210,12 +210,12 @@ def build_lightweight_chart_html(
         agg_trade_ws_url = ""
         mark_price_note = "offline"
 
-    # 永續 WS 全掛時，瀏覽器端 fallback 現貨 WS（僅即時參考）
+    ws_spot_fallback = market == "futures" and allow_spot_ws_fallback()
     spot_agg_fallback = (
-        binance_agg_trade_ws_url(sym, "spot") if market == "futures" else ""
+        binance_agg_trade_ws_url(sym, "spot") if ws_spot_fallback else ""
     )
     spot_kline_fallback = (
-        binance_kline_ws_url(sym, chart_interval, "spot") if market == "futures" else ""
+        binance_kline_ws_url(sym, chart_interval, "spot") if ws_spot_fallback else ""
     )
 
     boot = {
@@ -226,6 +226,7 @@ def build_lightweight_chart_html(
         "wsUrl": ws_url,
         "combinedFuturesUrl": combined if use_live and market == "futures" else "",
         "futuresSubscribeParams": sub_params if use_live and market == "futures" else [],
+        "allowSpotFallback": ws_spot_fallback,
         "spotAggFallbackUrl": spot_agg_fallback,
         "spotKlineFallbackUrl": spot_kline_fallback,
         "markPriceWsUrl": mark_price_ws_url,
@@ -431,7 +432,8 @@ def build_lightweight_chart_html(
     if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) {{
       parts.push('Agg ' + (aggOk ? '✓' : '…'));
     }}
-    if (usingSpotFallback) parts.push('現貨備援');
+    if (usingSpotFallback) parts.push('現貨備援 stream.binance.com');
+    else if (activeFeedHost) parts.push('行情 ' + activeFeedHost);
     if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
       st.textContent = '未設定 WebSocket（僅顯示歷史 K）';
       return;
@@ -505,7 +507,17 @@ def build_lightweight_chart_html(
 
   let closed = false;
   let usingSpotFallback = false;
+  let activeFeedHost = '';
   let futuresWsAttempt = 0;
+
+  function setActiveFeed(url) {{
+    if (!url) return;
+    try {{
+      activeFeedHost = new URL(url).host;
+    }} catch (e) {{
+      activeFeedHost = url.indexOf('fstream') >= 0 ? 'fstream.binance.com' : 'stream.binance.com';
+    }}
+  }}
 
   function unwrapBinanceMsg(raw) {{
     if (raw && raw.stream && raw.data) return raw.data;
@@ -561,10 +573,20 @@ def build_lightweight_chart_html(
     }}
   }}
 
+  function futuresWsFailedMessage() {{
+    st.textContent = '永續 fstream 連線失敗 · 僅顯示歷史 K（請確認網路或 Zeabur 區域）';
+    st.style.color = '#ef5350';
+    tradePxEl.textContent = '（永續 WS 未連線）';
+  }}
+
   function startSpotFallback() {{
     if (closed || usingSpotFallback) return;
+    if (!BOOT.allowSpotFallback) {{
+      futuresWsFailedMessage();
+      return;
+    }}
     usingSpotFallback = true;
-    st.textContent = '永續 fstream 無法連線 · 暫用現貨 WS 顯示最新成交（僅參考）';
+    st.textContent = '永續 fstream 無法連線 · 暫用現貨 WS（僅參考，非 USDT.P）';
     st.style.color = '#f0b90b';
     if (BOOT.spotKlineFallbackUrl) connectKlineUrl(BOOT.spotKlineFallbackUrl);
     if (BOOT.spotAggFallbackUrl) connectAggUrl(BOOT.spotAggFallbackUrl);
@@ -573,6 +595,7 @@ def build_lightweight_chart_html(
   function connectFuturesSubscribe() {{
     if (closed || !BOOT.futuresSubscribeParams || !BOOT.futuresSubscribeParams.length) return;
     futuresWsAttempt += 1;
+    setActiveFeed('wss://fstream.binance.com/ws');
     const ws = new WebSocket('wss://fstream.binance.com/ws');
     ws.onopen = () => {{
       ws.send(JSON.stringify({{
@@ -602,12 +625,13 @@ def build_lightweight_chart_html(
     }};
     setTimeout(() => {{
       if (!closed && !klineOk && !aggOk && !usingSpotFallback) startSpotFallback();
-    }}, 8000);
+    }}, 12000);
   }}
 
   function connectFuturesCombined() {{
     if (closed || !BOOT.combinedFuturesUrl) return;
     futuresWsAttempt += 1;
+    setActiveFeed(BOOT.combinedFuturesUrl);
     const ws = new WebSocket(BOOT.combinedFuturesUrl);
     ws.onopen = () => {{ statusLine(); }};
     ws.onmessage = (ev) => {{
@@ -638,11 +662,12 @@ def build_lightweight_chart_html(
         try {{ ws.close(); }} catch (e) {{}}
         connectFuturesSubscribe();
       }}
-    }}, 6000);
+    }}, 12000);
   }}
 
   function connectKlineUrl(url) {{
     if (!url || closed) return;
+    setActiveFeed(url);
     const ws = new WebSocket(url);
     ws.onopen = () => {{ klineOk = true; statusLine(); }};
     ws.onclose = () => {{
@@ -663,6 +688,7 @@ def build_lightweight_chart_html(
 
   function connectAggUrl(url) {{
     if (!url || closed) return;
+    setActiveFeed(url);
     const ws = new WebSocket(url);
     ws.onopen = () => {{
       aggOk = true;
@@ -687,6 +713,7 @@ def build_lightweight_chart_html(
 
   function connectKline() {{
     if (!BOOT.wsUrl || closed) return;
+    setActiveFeed(BOOT.wsUrl);
     const ws = new WebSocket(BOOT.wsUrl);
     ws.onopen = () => {{ klineOk = true; statusLine(); }};
     ws.onclose = () => {{
@@ -725,6 +752,7 @@ def build_lightweight_chart_html(
 
   function connectAggTrade() {{
     if (!BOOT.aggTradeWsUrl || closed) return;
+    setActiveFeed(BOOT.aggTradeWsUrl);
     const ws = new WebSocket(BOOT.aggTradeWsUrl);
     ws.onopen = () => {{
       aggOk = true;
@@ -776,12 +804,14 @@ def build_order_panel_live_price_html(
     sym = symbol.replace("/", "").upper()
     mkt_label = "永續" if market == "futures" else "現貨"
     agg_url = binance_agg_trade_ws_url(sym, market)
-    spot_agg = binance_agg_trade_ws_url(sym, "spot") if market == "futures" else ""
+    ws_spot_fallback = market == "futures" and allow_spot_ws_fallback()
+    spot_agg = binance_agg_trade_ws_url(sym, "spot") if ws_spot_fallback else ""
 
     boot = {
         "symbol": sym,
         "market": market,
         "aggTradeWsUrl": agg_url,
+        "allowSpotFallback": ws_spot_fallback,
         "spotAggFallbackUrl": spot_agg,
         "mktLabel": mkt_label,
     }
@@ -830,22 +860,30 @@ def build_order_panel_live_price_html(
   let closed = false;
   let usingSpot = false;
   let gotTick = false;
+  let activeHost = '';
+
+  function feedLabel() {{
+    if (usingSpot) return '實際 stream.binance.com（現貨備援）';
+    if (activeHost) return '實際 ' + activeHost;
+    return BOOT.mktLabel + ' · aggTrade';
+  }}
 
   function onAgg(px, buyerMaker) {{
     gotTick = true;
     pxEl.textContent = formatPx(px);
     pxEl.className = buyerMaker ? 'sell' : 'buy';
-    subEl.textContent = (usingSpot ? '現貨 WS 備援 · ' : '') + BOOT.mktLabel + ' · aggTrade · 與圖同步';
-    subEl.style.color = '#26a69a';
+    subEl.textContent = feedLabel() + ' · 與圖同步';
+    subEl.style.color = usingSpot ? '#f0b90b' : '#26a69a';
   }}
 
   function connectAgg(url, isFallback) {{
     if (!url || closed) return null;
+    try {{ activeHost = new URL(url).host; }} catch (e) {{ activeHost = ''; }}
     const ws = new WebSocket(url);
     ws.onopen = () => {{
       usingSpot = !!isFallback;
-      subEl.textContent = (usingSpot ? '現貨 WS 備援 · ' : '') + 'aggTrade 已連線';
-      subEl.style.color = '#787b86';
+      subEl.textContent = feedLabel() + ' 已連線';
+      subEl.style.color = usingSpot ? '#f0b90b' : '#787b86';
     }};
     ws.onmessage = (ev) => {{
       try {{
@@ -868,11 +906,16 @@ def build_order_panel_live_price_html(
   let mainWs = connectAgg(BOOT.aggTradeWsUrl, false);
   setTimeout(() => {{
     if (closed || gotTick) return;
+    if (!BOOT.allowSpotFallback && BOOT.market === 'futures') {{
+      subEl.textContent = '永續 fstream 未收到成交 · 請確認 WS 或網路';
+      subEl.style.color = '#ef5350';
+      return;
+    }}
     if (BOOT.spotAggFallbackUrl && BOOT.market === 'futures') {{
       try {{ if (mainWs) mainWs.close(); }} catch (e) {{}}
       connectAgg(BOOT.spotAggFallbackUrl, true);
     }}
-  }}, 4000);
+  }}, 8000);
 
   window.addEventListener('beforeunload', () => {{ closed = true; }});
 }})();
