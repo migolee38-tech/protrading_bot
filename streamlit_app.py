@@ -417,6 +417,13 @@ def _order_right_panel(
             height=88,
             scrolling=False,
         )
+        if market == "futures":
+            rest_px = fetch_symbol_last_price(sym, market)
+            if rest_px > 0:
+                st.caption(
+                    f"永續 REST（fapi）參考價 **{rest_px:,.6g}** — "
+                    "若上方 WS 顯示未收到成交，可先參考此價（與 TV USDT.P 同源類型）"
+                )
     elif last_px > 0:
         st.metric("最新價", f"{last_px:,.6g}")
         st.caption("離線／未啟用 WS · 榜單參考價")

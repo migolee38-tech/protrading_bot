@@ -187,11 +187,12 @@ def build_lightweight_chart_html(
     sym = symbol.replace("/", "").upper()
 
     if use_live and market == "futures":
-        combined = binance_futures_combined_stream_url(sym, chart_interval)
-        sub_params = binance_futures_stream_names(sym, chart_interval)
-        ws_url = ""
-        mark_price_ws_url = ""
-        agg_trade_ws_url = ""
+        # 三條獨立 fstream（與現貨相同模式）；合併流在部分環境較易失敗
+        combined = ""
+        sub_params = []
+        ws_url = binance_kline_ws_url(sym, chart_interval, "futures")
+        agg_trade_ws_url = binance_agg_trade_ws_url(sym, "futures")
+        mark_price_ws_url = binance_mark_price_ws_url(sym, "futures")
         mark_price_note = None
     elif use_live and market == "spot":
         combined = ""
@@ -733,6 +734,7 @@ def build_lightweight_chart_html(
 
   function connectMark() {{
     if (!BOOT.markPriceWsUrl || closed) return;
+    setActiveFeed(BOOT.markPriceWsUrl);
     const ws = new WebSocket(BOOT.markPriceWsUrl);
     ws.onopen = () => {{ markOk = true; statusLine(); }};
     ws.onclose = () => {{
@@ -768,7 +770,7 @@ def build_lightweight_chart_html(
     ws.onerror = () => {{ aggOk = false; statusLine(); }};
     ws.onmessage = (ev) => {{
       try {{
-        const msg = JSON.parse(ev.data);
+        const msg = unwrapBinanceMsg(JSON.parse(ev.data));
         if (msg.e !== 'aggTrade' || msg.p == null) return;
         const px = parseFloat(msg.p);
         const mBuyerMaker = !!msg.m;
@@ -903,19 +905,31 @@ def build_order_panel_live_price_html(
     return ws;
   }}
 
+  function scheduleFuturesAggRetry(attempt) {{
+    setTimeout(() => {{
+      if (closed || gotTick) return;
+      if (BOOT.allowSpotFallback && BOOT.spotAggFallbackUrl && BOOT.market === 'futures') {{
+        try {{ if (mainWs) mainWs.close(); }} catch (e) {{}}
+        connectAgg(BOOT.spotAggFallbackUrl, true);
+        return;
+      }}
+      if (!BOOT.allowSpotFallback && BOOT.market === 'futures' && attempt < 4) {{
+        subEl.textContent = '永續 fstream 連線中（重試 ' + (attempt + 1) + '/4）…';
+        subEl.style.color = '#787b86';
+        try {{ if (mainWs) mainWs.close(); }} catch (e) {{}}
+        mainWs = connectAgg(BOOT.aggTradeWsUrl, false);
+        scheduleFuturesAggRetry(attempt + 1);
+        return;
+      }}
+      if (!gotTick) {{
+        subEl.textContent = '永續 fstream 未收到成交 · 請看下方 REST 參考價';
+        subEl.style.color = '#ef5350';
+      }}
+    }}, attempt === 0 ? 6000 : 5000);
+  }}
+
   let mainWs = connectAgg(BOOT.aggTradeWsUrl, false);
-  setTimeout(() => {{
-    if (closed || gotTick) return;
-    if (!BOOT.allowSpotFallback && BOOT.market === 'futures') {{
-      subEl.textContent = '永續 fstream 未收到成交 · 請確認 WS 或網路';
-      subEl.style.color = '#ef5350';
-      return;
-    }}
-    if (BOOT.spotAggFallbackUrl && BOOT.market === 'futures') {{
-      try {{ if (mainWs) mainWs.close(); }} catch (e) {{}}
-      connectAgg(BOOT.spotAggFallbackUrl, true);
-    }}
-  }}, 8000);
+  scheduleFuturesAggRetry(0);
 
   window.addEventListener('beforeunload', () => {{ closed = true; }});
 }})();
