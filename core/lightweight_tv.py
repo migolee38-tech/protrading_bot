@@ -13,7 +13,14 @@ from typing import Any
 
 import pandas as pd
 
-from core.market_data import MarketType, allow_spot_ws_fallback
+from core.market_data import (
+    FUTURES_BASE,
+    SPOT_BASE,
+    SPOT_MIRROR_BASE,
+    MarketType,
+    allow_spot_ws_fallback,
+    strict_futures_only,
+)
 
 
 def binance_kline_ws_url(symbol: str, interval: str, market: MarketType) -> str:
@@ -804,23 +811,40 @@ def build_lightweight_chart_html(
 </body></html>"""
 
 
-def build_order_panel_live_price_html(
+def binance_rest_ticker_urls(symbol: str, market: MarketType) -> list[str]:
+    """瀏覽器端可直接 fetch 的最新成交價 REST 端點（依序嘗試）。"""
+    s = symbol.replace("/", "").upper()
+    if market == "futures":
+        urls = [f"{FUTURES_BASE}/fapi/v1/ticker/price?symbol={s}"]
+        if not strict_futures_only():
+            urls.append(f"{SPOT_BASE}/api/v3/ticker/price?symbol={s}")
+            urls.append(f"{SPOT_MIRROR_BASE}/api/v3/ticker/price?symbol={s}")
+        return urls
+    return [
+        f"{SPOT_BASE}/api/v3/ticker/price?symbol={s}",
+        f"{SPOT_MIRROR_BASE}/api/v3/ticker/price?symbol={s}",
+    ]
+
+
+def build_live_price_rest_html(
     symbol: str,
     market: MarketType = "futures",
+    *,
+    poll_ms: int = 400,
 ) -> str:
-    """右欄下單區：與 K 線圖相同 @aggTrade WebSocket，即時最新成交價。"""
+    """方案 B：瀏覽器端每 poll_ms 直接 fetch 幣安 REST 最新成交價。
+
+    不經 Streamlit 伺服器（無 rerun、不閃跳），且走每位使用者自己的瀏覽器 IP
+    （不吃 Zeabur 共用額度）。REST 為單純 HTTPS 請求/回應，較易穿過會擋 WS
+    data frame 的網路；CORS 為 `Access-Control-Allow-Origin: *`。
+    """
     sym = symbol.replace("/", "").upper()
-    mkt_label = "永續" if market == "futures" else "現貨"
-    agg_url = binance_agg_trade_ws_url(sym, market)
-    ws_spot_fallback = market == "futures" and allow_spot_ws_fallback()
-    spot_agg = binance_agg_trade_ws_url(sym, "spot") if ws_spot_fallback else ""
+    mkt_label = "永續 fapi" if market == "futures" else "現貨 api"
+    urls = binance_rest_ticker_urls(sym, market)
 
     boot = {
-        "symbol": sym,
-        "market": market,
-        "aggTradeWsUrl": agg_url,
-        "allowSpotFallback": ws_spot_fallback,
-        "spotAggFallbackUrl": spot_agg,
+        "urls": urls,
+        "pollMs": max(150, int(poll_ms)),
         "mktLabel": mkt_label,
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
@@ -837,7 +861,7 @@ def build_order_panel_live_price_html(
   .lbl {{ font-size: 0.82rem; color: #a3a8b8; margin-bottom: 2px; }}
   #px {{
     font-size: 1.55rem; font-weight: 700; font-variant-numeric: tabular-nums;
-    letter-spacing: 0.02em; line-height: 1.2;
+    letter-spacing: 0.02em; line-height: 1.2; transition: color 0.08s;
   }}
   #px.buy {{ color: #26a69a; }}
   #px.sell {{ color: #ef5350; }}
@@ -849,7 +873,7 @@ def build_order_panel_live_price_html(
 <div id="wrap">
   <div class="lbl">最新價</div>
   <div id="px" class="flat">—</div>
-  <div id="sub">aggTrade 連線中…</div>
+  <div id="sub">REST 連線中…</div>
 </div>
 <script>
 (function() {{
@@ -865,79 +889,62 @@ def build_order_panel_live_price_html(
     return n.toLocaleString('en-US', {{ minimumFractionDigits: 2, maximumFractionDigits: d }});
   }}
 
+  let prev = null;
+  let urlIdx = 0;
+  let inFlight = false;
+  let okHost = '';
   let closed = false;
-  let usingSpot = false;
-  let gotTick = false;
-  let activeHost = '';
+  let failStreak = 0;
 
-  function feedLabel() {{
-    if (usingSpot) return '實際 stream.binance.com（現貨備援）';
-    if (activeHost) return '實際 ' + activeHost;
-    return BOOT.mktLabel + ' · aggTrade';
+  function setPx(n) {{
+    if (!isFinite(n) || n <= 0) return;
+    pxEl.textContent = formatPx(n);
+    let cls = 'flat';
+    if (prev != null) {{
+      if (n > prev) cls = 'buy';
+      else if (n < prev) cls = 'sell';
+    }}
+    pxEl.className = cls;
+    prev = n;
   }}
 
-  function onAgg(px, buyerMaker) {{
-    gotTick = true;
-    pxEl.textContent = formatPx(px);
-    pxEl.className = buyerMaker ? 'sell' : 'buy';
-    subEl.textContent = feedLabel() + ' · 與圖同步';
-    subEl.style.color = usingSpot ? '#f0b90b' : '#26a69a';
-  }}
-
-  function connectAgg(url, isFallback) {{
-    if (!url || closed) return null;
-    try {{ activeHost = new URL(url).host; }} catch (e) {{ activeHost = ''; }}
-    const ws = new WebSocket(url);
-    ws.onopen = () => {{
-      usingSpot = !!isFallback;
-      subEl.textContent = feedLabel() + ' 已連線';
-      subEl.style.color = usingSpot ? '#f0b90b' : '#787b86';
-    }};
-    ws.onmessage = (ev) => {{
+  async function poll() {{
+    if (inFlight || closed) return;
+    inFlight = true;
+    let got = false;
+    for (let i = 0; i < BOOT.urls.length; i++) {{
+      const idx = (urlIdx + i) % BOOT.urls.length;
       try {{
-        const raw = JSON.parse(ev.data);
-        const msg = raw.stream && raw.data ? raw.data : raw;
-        if (msg.e !== 'aggTrade' || msg.p == null) return;
-        onAgg(parseFloat(msg.p), !!msg.m);
+        const r = await fetch(BOOT.urls[idx], {{ cache: 'no-store', mode: 'cors' }});
+        if (!r.ok) continue;
+        const j = await r.json();
+        const n = parseFloat(j.price);
+        if (isFinite(n) && n > 0) {{
+          urlIdx = idx;
+          try {{ okHost = new URL(BOOT.urls[idx]).host; }} catch (e) {{ okHost = ''; }}
+          setPx(n);
+          subEl.textContent = BOOT.mktLabel + ' · 每 ' + BOOT.pollMs + 'ms · ' + okHost;
+          subEl.style.color = '#26a69a';
+          got = true;
+          break;
+        }}
       }} catch (e) {{}}
-    }};
-    ws.onerror = () => {{
-      subEl.textContent = 'aggTrade 連線失敗';
-      subEl.style.color = '#ef5350';
-    }};
-    ws.onclose = () => {{
-      if (!closed) setTimeout(() => connectAgg(url, isFallback), 2500);
-    }};
-    return ws;
-  }}
-
-  function scheduleFuturesAggRetry(attempt) {{
-    setTimeout(() => {{
-      if (closed || gotTick) return;
-      if (BOOT.allowSpotFallback && BOOT.spotAggFallbackUrl && BOOT.market === 'futures') {{
-        try {{ if (mainWs) mainWs.close(); }} catch (e) {{}}
-        connectAgg(BOOT.spotAggFallbackUrl, true);
-        return;
-      }}
-      if (!BOOT.allowSpotFallback && BOOT.market === 'futures' && attempt < 4) {{
-        subEl.textContent = '永續 fstream 連線中（重試 ' + (attempt + 1) + '/4）…';
-        subEl.style.color = '#787b86';
-        try {{ if (mainWs) mainWs.close(); }} catch (e) {{}}
-        mainWs = connectAgg(BOOT.aggTradeWsUrl, false);
-        scheduleFuturesAggRetry(attempt + 1);
-        return;
-      }}
-      if (!gotTick) {{
-        subEl.textContent = '永續 fstream 未收到成交 · 請看下方 REST 參考價';
+    }}
+    if (!got) {{
+      failStreak += 1;
+      if (failStreak >= 3) {{
+        subEl.textContent = BOOT.mktLabel + ' · REST 取價失敗（重試中）';
         subEl.style.color = '#ef5350';
       }}
-    }}, attempt === 0 ? 6000 : 5000);
+    }} else {{
+      failStreak = 0;
+    }}
+    inFlight = false;
   }}
 
-  let mainWs = connectAgg(BOOT.aggTradeWsUrl, false);
-  scheduleFuturesAggRetry(0);
-
-  window.addEventListener('beforeunload', () => {{ closed = true; }});
+  poll();
+  const timer = setInterval(poll, BOOT.pollMs);
+  window.addEventListener('beforeunload', () => {{ closed = true; clearInterval(timer); }});
 }})();
 </script>
 </body></html>"""
