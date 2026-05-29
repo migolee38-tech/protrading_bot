@@ -32,7 +32,6 @@ from core.app_auth import auth_is_enabled, render_login_gate, render_logout_cont
 from core.backtest_report import run_backtest
 from core.lightweight_tv import (
     build_lightweight_chart_html,
-    build_order_panel_live_price_html,
     df_to_tv_series,
     markers_for_open_orders,
     markers_for_strategies,
@@ -125,6 +124,25 @@ def _klines_for_chart(
         df = fetch_klines(symbol, interval=interval, limit=limit, market=market)
         return df, str(df.attrs.get("price_source", market))
     return _cached_klines(symbol, interval, limit, market)  # type: ignore[arg-type]
+
+
+@st.cache_data(ttl=1)
+def _live_last_price_cached(sym: str, market: str) -> float:
+    """伺服器端每秒抓 fapi（永續）/ api（現貨）最新成交價；ttl=1 讓多處呼叫同步取值。"""
+    return fetch_symbol_last_price(sym, market)  # type: ignore[arg-type]
+
+
+@st.fragment(run_every=1)
+def _live_price_metric(sym: str, market: MarketType) -> None:
+    """即時最新價（伺服器輪詢，不依賴瀏覽器 fstream WS）；每秒只重繪這一小塊。"""
+    px = _live_last_price_cached(sym, market)
+    src = "永續 fapi" if market == "futures" else "現貨 api"
+    if px > 0:
+        st.metric("最新價", f"{px:,.6g}")
+        st.caption(f"Binance {src} · 伺服器每秒更新 · 圖上同步")
+    else:
+        st.metric("最新價", "—")
+        st.caption(f"{src} 暫時無法取得價格")
 
 
 def _last_price(sym: str, universe_df: pd.DataFrame, market: MarketType) -> float:
@@ -427,11 +445,7 @@ def _order_right_panel(
     st.markdown("##### 下單")
     st.caption(pair)
     if use_live:
-        components.html(
-            build_order_panel_live_price_html(sym, market),
-            height=88,
-            scrolling=False,
-        )
+        _live_price_metric(sym, market)
     elif last_px > 0:
         st.metric("最新價", f"{last_px:,.6g}")
         st.caption("離線／未啟用 WS · 榜單參考價")
@@ -692,6 +706,7 @@ def _render_chart_block(
         market=market,
         use_live=browser_ws,
         chart_height=560,
+        show_price_header=False,
     )
     components.html(html_doc, height=640, scrolling=False)
     if live_futures_server:
@@ -725,6 +740,8 @@ def _main_workstation(
         _order_right_panel(strategy_ids, market, universe_df, chart_highlight, use_live)
 
     with col_chart:
+        if use_live:
+            _live_price_metric(sym, market)
         try:
             raw = _render_chart_block(
                 sym,

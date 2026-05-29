@@ -182,9 +182,15 @@ def build_lightweight_chart_html(
     mark_price_ws_url: str = "",
     mark_price_note: str | None = None,
     agg_trade_ws_url: str = "",
+    show_price_header: bool = True,
 ) -> str:
-    """產生可給 streamlit.components.v1.html 的完整 HTML 文件。"""
+    """產生可給 streamlit.components.v1.html 的完整 HTML 文件。
+
+    show_price_header=False 時隱藏圖內「標記價／最新成交」兩行（價格改由外層
+    Streamlit 伺服器輪詢元件顯示，避免瀏覽器收不到 WS 幀時圖上顯示空白「—」）。
+    """
     sym = symbol.replace("/", "").upper()
+    price_hdr_style = "" if show_price_header else "display:none;"
 
     if use_live and market == "futures":
         # 三條獨立 fstream（與現貨相同模式）；合併流在部分環境較易失敗
@@ -271,11 +277,11 @@ def build_lightweight_chart_html(
 <div id="wrap">
   <div id="hdr">
     <div id="titleRow">{title_esc}</div>
-    <div id="markRow">
+    <div id="markRow" style="{price_hdr_style}">
       <span class="mark-label">標記價 (Mark)</span>
       <span id="markPx" class="flat">—</span>
     </div>
-    <div id="tradeRow">
+    <div id="tradeRow" style="{price_hdr_style}">
       <span class="mark-label">最新成交 (aggTrade)</span>
       <span id="tradePx" class="flat">—</span>
       <span id="aggRate"></span>
