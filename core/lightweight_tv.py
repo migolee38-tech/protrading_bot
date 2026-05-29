@@ -252,8 +252,8 @@ def build_lightweight_chart_html(
     boot_json = json.dumps(boot, ensure_ascii=False)
     title_esc = html.escape(title)
 
-    # lightweight-charts v4 standalone（瀏覽器需能連 unpkg）
-    cdn = "https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"
+    # lightweight-charts v5 standalone（多窗格 panes / createSeriesMarkers；瀏覽器需能連 unpkg）
+    cdn = "https://unpkg.com/lightweight-charts@5.2.0/dist/lightweight-charts.standalone.production.js"
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"/>
@@ -275,6 +275,10 @@ def build_lightweight_chart_html(
   #tradePx.sell {{ color: #ef5350; }}
   #tradePx.flat {{ color: #d1d4dc; }}
   #aggRate {{ font-size: 10px; color: #787b86; }}
+  #ctrlRow {{ display: flex; align-items: center; gap: 14px; margin-top: 4px; }}
+  #ctrlRow label {{ color: #b2b5be; font-size: 11px; cursor: pointer; user-select: none;
+    display: inline-flex; align-items: center; gap: 4px; }}
+  #ctrlRow input {{ accent-color: #2962ff; cursor: pointer; margin: 0; }}
   #chart {{ flex: 1; min-height: 0; width: 100%; }}
   #st {{ color: #787b86; font-size: 11px; padding: 4px 8px 6px; }}
 </style>
@@ -293,6 +297,11 @@ def build_lightweight_chart_html(
       <span id="tradePx" class="flat">—</span>
       <span id="aggRate"></span>
     </div>
+    <div id="ctrlRow">
+      <label><input type="checkbox" id="logChk"> 對數軸</label>
+      <label><input type="checkbox" id="magChk" checked> 十字準星吸附</label>
+      <label><input type="checkbox" id="volChk" checked> 成交量</label>
+    </div>
   </div>
   <div id="chart"></div>
   <div id="st">Live: WebSocket 連線中…</div>
@@ -305,6 +314,9 @@ def build_lightweight_chart_html(
   const markPxEl = document.getElementById('markPx');
   const tradePxEl = document.getElementById('tradePx');
   const aggRateEl = document.getElementById('aggRate');
+  const logChk = document.getElementById('logChk');
+  const magChk = document.getElementById('magChk');
+  const volChk = document.getElementById('volChk');
 
   const chart = LightweightCharts.createChart(el, {{
     width: el.clientWidth,
@@ -312,13 +324,18 @@ def build_lightweight_chart_html(
     layout: {{
       background: {{ color: '#131722' }},
       textColor: '#d1d4dc',
+      panes: {{
+        separatorColor: '#2a2e39',
+        separatorHoverColor: 'rgba(41, 98, 255, 0.3)',
+        enableResize: true,
+      }},
     }},
     grid: {{
       vertLines: {{ color: '#2a2e39' }},
       horzLines: {{ color: '#2a2e39' }},
     }},
     crosshair: {{
-      mode: LightweightCharts.CrosshairMode.Normal,
+      mode: LightweightCharts.CrosshairMode.Magnet,
     }},
     timeScale: {{
       timeVisible: true,
@@ -327,27 +344,39 @@ def build_lightweight_chart_html(
     }},
     rightPriceScale: {{
       borderColor: '#2a2e39',
-      scaleMargins: {{ top: 0.08, bottom: 0.22 }},
+      scaleMargins: {{ top: 0.08, bottom: 0.08 }},
     }},
   }});
 
-  const candleSeries = chart.addCandlestickSeries({{
+  const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {{
     upColor: '#26a69a', downColor: '#ef5350',
     borderVisible: false,
     wickUpColor: '#26a69a', wickDownColor: '#ef5350',
   }});
 
-  const volumeSeries = chart.addHistogramSeries({{
+  // 成交量放第 2 個窗格（pane 1）：可拖曳分隔線、可單獨縮放（TV 風）
+  const volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, {{
     color: '#26a69a',
     priceFormat: {{ type: 'volume' }},
-    priceScaleId: '',
-    scaleMargins: {{ top: 0.85, bottom: 0 }},
+  }}, 1);
+  volumeSeries.priceScale().applyOptions({{
+    scaleMargins: {{ top: 0.1, bottom: 0 }},
+    borderColor: '#2a2e39',
   }});
+
+  // 價格窗格 ~75%，成交量窗格 ~25%
+  try {{
+    const panes = chart.panes();
+    if (panes && panes.length >= 2) {{
+      panes[0].setStretchFactor(3);
+      panes[1].setStretchFactor(1);
+    }}
+  }} catch (e) {{}}
 
   let markSeries = null;
   let lastTradeSeries = null;
   if (BOOT.markPriceWsUrl || BOOT.combinedFuturesUrl) {{
-    markSeries = chart.addLineSeries({{
+    markSeries = chart.addSeries(LightweightCharts.LineSeries, {{
       color: '#f0b90b',
       lineWidth: 2,
       priceLineVisible: true,
@@ -356,7 +385,7 @@ def build_lightweight_chart_html(
     }});
   }}
   if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl) {{
-    lastTradeSeries = chart.addLineSeries({{
+    lastTradeSeries = chart.addSeries(LightweightCharts.LineSeries, {{
       color: '#29b6f6',
       lineWidth: 1,
       priceLineVisible: false,
@@ -379,9 +408,33 @@ def build_lightweight_chart_html(
 
   candleSeries.setData(BOOT.candles);
   volumeSeries.setData(BOOT.volumes);
-  if (BOOT.markers && BOOT.markers.length) {{
-    candleSeries.setMarkers(BOOT.markers);
+  const seriesMarkers = LightweightCharts.createSeriesMarkers(
+    candleSeries, (BOOT.markers && BOOT.markers.length) ? BOOT.markers : []
+  );
+
+  // 工具列：對數軸 / 十字準星吸附 / 成交量顯示
+  function applyLogScale() {{
+    candleSeries.priceScale().applyOptions({{
+      mode: logChk.checked
+        ? LightweightCharts.PriceScaleMode.Logarithmic
+        : LightweightCharts.PriceScaleMode.Normal,
+    }});
   }}
+  function applyMagnet() {{
+    chart.applyOptions({{
+      crosshair: {{
+        mode: magChk.checked
+          ? LightweightCharts.CrosshairMode.Magnet
+          : LightweightCharts.CrosshairMode.Normal,
+      }},
+    }});
+  }}
+  function applyVolumeVisible() {{
+    volumeSeries.applyOptions({{ visible: volChk.checked }});
+  }}
+  if (logChk) logChk.addEventListener('change', applyLogScale);
+  if (magChk) magChk.addEventListener('change', applyMagnet);
+  if (volChk) volChk.addEventListener('change', applyVolumeVisible);
 
   let lastBarTime = null;
   /** 僅在未完成棒上 agg refinement：open 永遠跟 kline；high/low/close 可跟 agg */

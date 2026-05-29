@@ -673,9 +673,8 @@ def _render_chart_block(
         )
     candles, volumes = df_to_tv_series(raw)
     markers: list[dict] = []
-    if STRATEGIES[chart_highlight].timeframe == chart_tf:
-        prep_hi = STRATEGIES[chart_highlight].prepare_df(raw)
-        markers = markers_for_strategies(prep_hi, [chart_highlight])
+    prep_hi = STRATEGIES[chart_highlight].prepare_df(raw)
+    markers = markers_for_strategies(prep_hi, [chart_highlight])
     orders_df = list_paper_orders()
     markers.extend(markers_for_open_orders(orders_df, sym, candles))
 
