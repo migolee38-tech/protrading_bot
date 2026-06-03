@@ -673,10 +673,15 @@ def _render_chart_block(
         )
     candles, volumes = df_to_tv_series(raw)
     markers: list[dict] = []
-    prep_hi = STRATEGIES[chart_highlight].prepare_df(raw)
-    markers = markers_for_strategies(prep_hi, [chart_highlight])
+    # 顯示所有已啟用策略的觸發箭頭（依目前圖表週期計算），不再只畫單一高亮策略，
+    # 避免高亮到當下無訊號的策略（如 EMA）時整張圖看不到任何標記。
+    shown_ids = strategy_ids or [chart_highlight]
+    for sid in shown_ids:
+        prep_s = STRATEGIES[sid].prepare_df(raw)
+        markers.extend(markers_for_strategies(prep_s, [sid]))
     orders_df = list_paper_orders()
     markers.extend(markers_for_open_orders(orders_df, sym, candles))
+    markers.sort(key=lambda m: m["time"])
 
     mkt_label = "永續" if market == "futures" else "現貨"
     if live_futures_server:

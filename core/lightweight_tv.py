@@ -319,8 +319,7 @@ def build_lightweight_chart_html(
   const volChk = document.getElementById('volChk');
 
   const chart = LightweightCharts.createChart(el, {{
-    width: el.clientWidth,
-    height: Math.max(320, BOOT.chartHeight || 600),
+    autoSize: true,
     layout: {{
       background: {{ color: '#131722' }},
       textColor: '#d1d4dc',
@@ -337,10 +336,24 @@ def build_lightweight_chart_html(
     crosshair: {{
       mode: LightweightCharts.CrosshairMode.Magnet,
     }},
+    // 拖曳平移 + 滾輪/雙指縮放 + 慣性，與 TradingView 操作一致
+    handleScroll: {{
+      mouseWheel: true,
+      pressedMouseMove: true,
+      horzTouchDrag: true,
+      vertTouchDrag: true,
+    }},
+    handleScale: {{
+      axisPressedMouseMove: true,
+      mouseWheel: true,
+      pinch: true,
+    }},
+    kineticScroll: {{ touch: true, mouse: false }},
     timeScale: {{
       timeVisible: true,
       secondsVisible: false,
       borderColor: '#2a2e39',
+      rightOffset: 4,
     }},
     rightPriceScale: {{
       borderColor: '#2a2e39',
@@ -359,13 +372,12 @@ def build_lightweight_chart_html(
     color: '#26a69a',
     priceFormat: {{ type: 'volume' }},
   }}, 1);
-  volumeSeries.priceScale().applyOptions({{
-    scaleMargins: {{ top: 0.1, bottom: 0 }},
-    borderColor: '#2a2e39',
-  }});
-
-  // 價格窗格 ~75%，成交量窗格 ~25%
   try {{
+    volumeSeries.priceScale().applyOptions({{
+      scaleMargins: {{ top: 0.1, bottom: 0 }},
+      borderColor: '#2a2e39',
+    }});
+    // 價格窗格 ~75%，成交量窗格 ~25%
     const panes = chart.panes();
     if (panes && panes.length >= 2) {{
       panes[0].setStretchFactor(3);
@@ -452,12 +464,7 @@ def build_lightweight_chart_html(
   }}
 
   chart.timeScale().fitContent();
-
-  function resize() {{
-    chart.applyOptions({{ width: el.clientWidth, height: Math.max(320, BOOT.chartHeight || 600) }});
-  }}
-  window.addEventListener('resize', resize);
-  new ResizeObserver(resize).observe(el.parentElement || el);
+  // autoSize:true 由圖表內建 ResizeObserver 處理尺寸，毋需手動 resize
 
   let prevMark = null;
 
