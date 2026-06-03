@@ -67,6 +67,23 @@ def _time_sec(ts: Any) -> int:
     return int(pd.Timestamp(ts).timestamp())
 
 
+def _interval_to_seconds(interval: str) -> int:
+    """'5m'→300、'1h'→3600、'1d'→86400；無法解析回 0（前端不做跨棒）。"""
+    s = (interval or "").strip().lower()
+    try:
+        if s.endswith("m"):
+            return int(s[:-1]) * 60
+        if s.endswith("h"):
+            return int(s[:-1]) * 3600
+        if s.endswith("d"):
+            return int(s[:-1]) * 86400
+        if s.endswith("w"):
+            return int(s[:-1]) * 604800
+    except ValueError:
+        pass
+    return 0
+
+
 def df_to_tv_series(df: pd.DataFrame) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """輕量圖表用 candlestick + histogram volumes。"""
     candles: list[dict[str, Any]] = []
@@ -248,6 +265,10 @@ def build_lightweight_chart_html(
         "aggTradeWsUrl": agg_trade_ws_url,
         "title": title,
         "chartHeight": chart_height,
+        # 方案 D：圖內 client-side REST 輪詢（即使 WS 幀被網路擋掉，最後一根 K 棒/Last 線仍即時跳動）
+        "restTickerUrls": binance_rest_ticker_urls(sym, market) if use_live else [],
+        "restPollMs": 400,
+        "barSeconds": _interval_to_seconds(chart_interval),
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
     title_esc = html.escape(title)
@@ -453,13 +474,16 @@ def build_lightweight_chart_html(
   let currentBarOpen = null;
   let currentBarHigh = null;
   let currentBarLow = null;
+  let currentBarClose = null;
+  const restUrls = (BOOT.restTickerUrls && BOOT.restTickerUrls.length) ? BOOT.restTickerUrls : [];
   if (BOOT.candles && BOOT.candles.length) {{
     const last = BOOT.candles[BOOT.candles.length - 1];
     lastBarTime = last.time;
-    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl) {{
+    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || restUrls.length) {{
       currentBarOpen = last.open;
       currentBarHigh = last.high;
       currentBarLow = last.low;
+      currentBarClose = last.close;
     }}
   }}
 
@@ -542,9 +566,12 @@ def build_lightweight_chart_html(
   let pendingTradePrice = null;
   let pendingTradeMaker = false;
   let rafPending = false;
+  /** WS 最近一次送來成交價的時間戳；REST 輪詢在此 2.5s 內讓 WS 主導，避免重複驅動 */
+  let lastWsPxTs = 0;
   function flushAggUi() {{
     rafPending = false;
     if (pendingTradePrice == null || !isFinite(pendingTradePrice)) return;
+    lastWsPxTs = Date.now();
     tradePxEl.textContent = formatPx(pendingTradePrice);
     tradePxEl.className = pendingTradeMaker ? 'sell' : 'buy';
     if (lastTradeSeries && lastBarTime != null) {{
@@ -560,6 +587,7 @@ def build_lightweight_chart_html(
       const px = pendingTradePrice;
       currentBarHigh = Math.max(currentBarHigh, px);
       currentBarLow = Math.min(currentBarLow, px);
+      currentBarClose = px;
       candleSeries.update({{
         time: lastBarTime,
         open: currentBarOpen,
@@ -609,10 +637,11 @@ def build_lightweight_chart_html(
       low: parseFloat(k.l),
       close: parseFloat(k.c),
     }};
-    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) {{
+    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback || restUrls.length) {{
       currentBarOpen = candle.open;
       currentBarHigh = candle.high;
       currentBarLow = candle.low;
+      currentBarClose = candle.close;
     }}
     const up = candle.close >= candle.open;
     const vol = {{
@@ -858,6 +887,63 @@ def build_lightweight_chart_html(
     return;
   }}
 
+  // === 方案 D：圖內 client-side REST 輪詢，推動最後一根 K 棒 + Last 線即時跳動 ===
+  // 你的網路會擋掉 WS 資料幀（成交價收不到），故以 REST 當圖內即時行情的後備驅動。
+  const REST_POLL_MS = Math.max(200, BOOT.restPollMs || 400);
+  const BAR_SEC = BOOT.barSeconds || 0;
+  let restUrlIdx = 0;
+  let restInFlight = false;
+
+  function applyLivePrice(px) {{
+    if (!isFinite(px) || px <= 0 || lastBarTime == null) return;
+    // 跨越到新一根 K 棒：以上一根收盤當新棒開盤（無 kline WS 時也能滾動）
+    if (BAR_SEC > 0) {{
+      const barStart = Math.floor(Date.now() / 1000 / BAR_SEC) * BAR_SEC;
+      if (barStart > lastBarTime) {{
+        const prevClose = (currentBarClose != null) ? currentBarClose : px;
+        lastBarTime = barStart;
+        currentBarOpen = prevClose;
+        currentBarHigh = Math.max(prevClose, px);
+        currentBarLow = Math.min(prevClose, px);
+      }}
+    }}
+    if (currentBarOpen == null) currentBarOpen = px;
+    currentBarHigh = (currentBarHigh == null) ? px : Math.max(currentBarHigh, px);
+    currentBarLow = (currentBarLow == null) ? px : Math.min(currentBarLow, px);
+    currentBarClose = px;
+    candleSeries.update({{
+      time: lastBarTime,
+      open: currentBarOpen,
+      high: currentBarHigh,
+      low: currentBarLow,
+      close: px,
+    }});
+    if (lastTradeSeries) lastTradeSeries.update({{ time: lastBarTime, value: px }});
+    tradePxEl.textContent = formatPx(px);
+    tradePxEl.className = 'flat';
+  }}
+
+  async function pollRestPrice() {{
+    if (restInFlight || closed || !restUrls.length) return;
+    // WS 在 2.5s 內有送成交就讓 WS 主導，避免兩路同時刷造成抖動
+    if (Date.now() - lastWsPxTs < 2500) return;
+    restInFlight = true;
+    try {{
+      for (let i = 0; i < restUrls.length; i++) {{
+        const idx = (restUrlIdx + i) % restUrls.length;
+        try {{
+          const r = await fetch(restUrls[idx], {{ cache: 'no-store', mode: 'cors' }});
+          if (!r.ok) continue;
+          const j = await r.json();
+          const n = parseFloat(j.price);
+          if (isFinite(n) && n > 0) {{ restUrlIdx = idx; applyLivePrice(n); break; }}
+        }} catch (e) {{}}
+      }}
+    }} finally {{
+      restInFlight = false;
+    }}
+  }}
+
   statusLine();
   if (BOOT.combinedFuturesUrl) {{
     connectFuturesCombined();
@@ -865,6 +951,10 @@ def build_lightweight_chart_html(
     if (BOOT.wsUrl) connectKline();
     if (BOOT.markPriceWsUrl) connectMark();
     if (BOOT.aggTradeWsUrl) connectAggTrade();
+  }}
+  if (restUrls.length) {{
+    pollRestPrice();
+    setInterval(pollRestPrice, REST_POLL_MS);
   }}
 }})();
 </script>
