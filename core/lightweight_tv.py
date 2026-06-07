@@ -2,7 +2,8 @@
 
 初始 K 線與策略 markers 由 Python 注入 JSON；連線後以 WS 增量更新。
 啟用 @aggTrade 時：開盤價與成交量僅跟 @kline_；high/low/close 可隨每笔聚合成交 refinement（仍以 kline 同步整根快照）。
-需可連線 unpkg CDN（載入 lightweight-charts@4）。
+圖表時間軸固定以台灣時區（Asia/Taipei, UTC+8）顯示。
+需可連線 unpkg CDN（載入 lightweight-charts@5）。
 """
 
 from __future__ import annotations
@@ -340,6 +341,51 @@ def build_lightweight_chart_html(
   const magChk = document.getElementById('magChk');
   const volChk = document.getElementById('volChk');
 
+  // 圖表時間軸固定顯示台灣時區（與 TradingView UTC+8 對齊）
+  const CHART_TZ = 'Asia/Taipei';
+  const TW_LOCALE = 'zh-TW';
+  const TZ_NOTE = '圖表時間 台北 (UTC+8)';
+
+  function utcSecToDate(ts) {{
+    if (typeof ts === 'number') return new Date(ts * 1000);
+    if (ts && typeof ts === 'object' && 'year' in ts) {{
+      return new Date(Date.UTC(ts.year, ts.month - 1, ts.day));
+    }}
+    return null;
+  }}
+
+  function formatChartDateTime(ts) {{
+    const d = utcSecToDate(ts);
+    if (!d) return String(ts);
+    return new Intl.DateTimeFormat(TW_LOCALE, {{
+      timeZone: CHART_TZ,
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }}).format(d);
+  }}
+
+  function formatTickMark(time, tickMarkType, locale) {{
+    const d = utcSecToDate(time);
+    if (!d) return String(time);
+    const TMT = LightweightCharts.TickMarkType || {{}};
+    const base = {{ timeZone: CHART_TZ, hour12: false }};
+    switch (tickMarkType) {{
+      case (TMT.Year != null ? TMT.Year : 0):
+        return new Intl.DateTimeFormat(TW_LOCALE, {{ ...base, year: 'numeric' }}).format(d);
+      case (TMT.Month != null ? TMT.Month : 1):
+        return new Intl.DateTimeFormat(TW_LOCALE, {{ ...base, month: 'short' }}).format(d);
+      case (TMT.DayOfMonth != null ? TMT.DayOfMonth : 2):
+        return new Intl.DateTimeFormat(TW_LOCALE, {{ ...base, day: 'numeric', month: 'short' }}).format(d);
+      default:
+        return new Intl.DateTimeFormat(TW_LOCALE, {{
+          ...base, hour: '2-digit', minute: '2-digit',
+        }}).format(d);
+    }}
+  }}
+
   const chart = LightweightCharts.createChart(el, {{
     autoSize: true,
     layout: {{
@@ -371,11 +417,17 @@ def build_lightweight_chart_html(
       pinch: true,
     }},
     kineticScroll: {{ touch: true, mouse: false }},
+    localization: {{
+      locale: TW_LOCALE,
+      dateFormat: 'yyyy-MM-dd',
+      timeFormatter: formatChartDateTime,
+    }},
     timeScale: {{
       timeVisible: true,
       secondsVisible: false,
       borderColor: '#2a2e39',
       rightOffset: 4,
+      tickMarkFormatter: formatTickMark,
     }},
     rightPriceScale: {{
       borderColor: '#2a2e39',
@@ -534,14 +586,14 @@ def build_lightweight_chart_html(
     if (usingSpotFallback) parts.push('現貨備援 stream.binance.com');
     else if (activeFeedHost) parts.push('行情 ' + activeFeedHost);
     if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
-      st.textContent = '未設定 WebSocket（僅顯示歷史 K）';
+      st.textContent = '未設定 WebSocket（僅顯示歷史 K） · ' + TZ_NOTE;
       return;
     }}
     if (parts.length === 0) {{
-      st.textContent = '未設定 WebSocket（僅顯示歷史 K）';
+      st.textContent = '未設定 WebSocket（僅顯示歷史 K） · ' + TZ_NOTE;
       return;
     }}
-    st.textContent = 'Live: ' + parts.join('  ·  ');
+    st.textContent = 'Live: ' + parts.join('  ·  ') + '  ·  ' + TZ_NOTE;
     st.style.color = (klineOk || markOk || aggOk) ? '#26a69a' : '#787b86';
   }}
 
@@ -678,7 +730,7 @@ def build_lightweight_chart_html(
   }}
 
   function futuresWsFailedMessage() {{
-    st.textContent = '永續 fstream 連線失敗 · 僅顯示歷史 K（請確認網路或 Zeabur 區域）';
+    st.textContent = '永續 fstream 連線失敗 · 僅顯示歷史 K（請確認網路或 Zeabur 區域） · ' + TZ_NOTE;
     st.style.color = '#ef5350';
     tradePxEl.textContent = '（永續 WS 未連線）';
   }}
@@ -690,7 +742,7 @@ def build_lightweight_chart_html(
       return;
     }}
     usingSpotFallback = true;
-    st.textContent = '永續 fstream 無法連線 · 暫用現貨 WS（僅參考，非 USDT.P）';
+    st.textContent = '永續 fstream 無法連線 · 暫用現貨 WS（僅參考，非 USDT.P） · ' + TZ_NOTE;
     st.style.color = '#f0b90b';
     if (BOOT.spotKlineFallbackUrl) connectKlineUrl(BOOT.spotKlineFallbackUrl);
     if (BOOT.spotAggFallbackUrl) connectAggUrl(BOOT.spotAggFallbackUrl);
@@ -883,7 +935,7 @@ def build_lightweight_chart_html(
   }}
 
   if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
-    st.textContent = '未設定 WebSocket（僅顯示歷史 K）';
+    st.textContent = '未設定 WebSocket（僅顯示歷史 K） · ' + TZ_NOTE;
     tradePxEl.textContent = '（未連線）';
     return;
   }}
