@@ -3,7 +3,7 @@
 DEFAULT_SYMBOL = "BTC/USDT"
 
 # --- EMA 趨勢交叉策略（勿與唐奇安共用下列參數）---
-STRATEGY = "ema"  # "ema" | "donchian" | "rsi" | "macd"
+STRATEGY = "ema"  # "ema" | "donchian" | "rsi" | "macd" | "hunting_funding"
 TIMEFRAME = "5m"
 
 EMA_FAST = 12
@@ -50,11 +50,41 @@ DONCHIAN_TRAIL_OFFSET_R = 2.0
 
 STATE_FILE = "state.json"
 
+# --- Hunting Funding（OI/CVD 五星評分）---
+HUNTING_FUNDING_TIMEFRAME = "5m"
+HUNTING_LOOKBACK = 4
+HUNTING_MIN_STARS = 5
+HUNTING_COOLDOWN_BARS = 24
+HUNTING_HTF_EMA_LEN = 150
+HUNTING_MAX_DIST_PCT = 5.0
+HUNTING_SL_SWING = 24
+HUNTING_MAX_SL_PCT = 5.0
+HUNTING_TP1_REDUCE_PCT = 0.30
+HUNTING_VOL_LEN = 20
+HUNTING_MOM_LEN = 10
+HUNTING_OI_MIN_PCT = 0.0
+HUNTING_USE_OI = True
+HUNTING_USE_CVD = True
+HUNTING_USE_VOL = True
+HUNTING_USE_TREND = True
+HUNTING_USE_MOM = True
+HUNTING_W_OI = 1.0
+HUNTING_W_CVD = 1.0
+HUNTING_W_VOL = 1.0
+HUNTING_W_TREND = 1.0
+HUNTING_W_MOM = 1.0
+HUNTING_TOTAL_CAPITAL = 100.0
+HUNTING_POSITION_PCT = 2.0
+HUNTING_USE_DIRECTION_COOLDOWN = True
+HUNTING_MAX_CONSECUTIVE_SL_DIR = 2
+
 
 def active_timeframe() -> str:
     """依目前 STRATEGY 回傳對應週期（EMA 用 TIMEFRAME，唐奇安用 DONCHIAN_TIMEFRAME）。"""
     if STRATEGY == "donchian":
         return DONCHIAN_TIMEFRAME
+    if STRATEGY == "hunting_funding":
+        return HUNTING_FUNDING_TIMEFRAME
     return TIMEFRAME
 
 

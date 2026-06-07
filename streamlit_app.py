@@ -45,7 +45,7 @@ from core.order_executor import (
     place_paper_order,
     scan_and_paper_trade,
 )
-from core.strategy_registry import STRATEGIES, scan_signals_for
+from core.strategy_registry import STRATEGIES, scan_signals_for, with_symbol
 from core.universe import top_usdt_pairs_by_volume, universe_price_source_label
 
 REPORTS_DIR = Path(__file__).parent / "data" / "reports"
@@ -210,7 +210,7 @@ def _strategy_order_hints(
     if meta is None:
         return None
     raw, _ = _cached_klines(sym, meta.timeframe, 500, market)
-    prep = meta.prepare_df(raw)
+    prep = meta.prepare_df(with_symbol(raw, sym))
     sigs = scan_signals_for(sid, prep)
     if not sigs:
         return None
@@ -391,6 +391,7 @@ def _sticky_top_toolbar(
 
 def _signal_chips(
     raw: pd.DataFrame,
+    sym: str,
     strategy_ids: list[str],
     chart_tf: str,
     chart_highlight: str,
@@ -403,7 +404,7 @@ def _signal_chips(
 
     chips: list[str] = []
     for sid in sig_ids:
-        prep = STRATEGIES[sid].prepare_df(raw)
+        prep = STRATEGIES[sid].prepare_df(with_symbol(raw, sym))
         sigs = scan_signals_for(sid, prep)
         name = STRATEGIES[sid].name
         if not sigs:
@@ -677,7 +678,7 @@ def _render_chart_block(
     # 避免高亮到當下無訊號的策略（如 EMA）時整張圖看不到任何標記。
     shown_ids = strategy_ids or [chart_highlight]
     for sid in shown_ids:
-        prep_s = STRATEGIES[sid].prepare_df(raw)
+        prep_s = STRATEGIES[sid].prepare_df(with_symbol(raw, sym))
         markers.extend(markers_for_strategies(prep_s, [sid]))
     orders_df = list_paper_orders()
     markers.extend(markers_for_open_orders(orders_df, sym, candles))
@@ -750,7 +751,7 @@ def _main_workstation(
                 hi_name,
                 live_futures_server=False,
             )
-            _signal_chips(raw, strategy_ids, chart_tf, chart_highlight)
+            _signal_chips(raw, sym, strategy_ids, chart_tf, chart_highlight)
             if STRATEGIES[chart_highlight].timeframe != chart_tf:
                 st.caption(
                     f"圖表週期 {chart_tf} 與高亮策略週期 "

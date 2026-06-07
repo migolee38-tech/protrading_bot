@@ -1,4 +1,4 @@
-"""策略註冊表：4 套策略的元資料與資料準備。"""
+"""策略註冊表：儀表板策略元資料與資料準備。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ class StrategyMeta:
     timeframe: str
 
     def prepare_df(self, raw: pd.DataFrame) -> pd.DataFrame:
+        if self.id == "hunting_funding":
+            from strategies.hunting_funding import prepare_dataframe
+
+            return prepare_dataframe(raw)
         if self.id == "donchian":
             df = add_indicators(raw)
             return add_donchian_channels(df)
@@ -40,6 +44,15 @@ def _patch_strategy(strategy_id: str):
     from core.strategy_context import use_strategy
 
     return use_strategy(strategy_id)
+
+
+def with_symbol(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """附加 symbol 至 attrs，供 Hunting Funding 等策略抓取 OI。"""
+    out = raw.copy()
+    out.attrs["symbol"] = symbol.replace("/", "").upper()
+    if hasattr(raw, "attrs") and "price_source" in raw.attrs:
+        out.attrs["price_source"] = raw.attrs["price_source"]
+    return out
 
 
 STRATEGIES: dict[str, StrategyMeta] = {
@@ -67,6 +80,12 @@ STRATEGIES: dict[str, StrategyMeta] = {
         description="MACD 線與訊號線金叉/死叉 + 柱狀體同向",
         timeframe=cfg.TIMEFRAME,
     ),
+    "hunting_funding": StrategyMeta(
+        id="hunting_funding",
+        name="Hunting Funding",
+        description="OI/CVD/量能/EMA150 趨勢/動能五星評分 · 1R減倉30% · 5R全出",
+        timeframe=cfg.HUNTING_FUNDING_TIMEFRAME,
+    ),
 }
 
 
@@ -84,6 +103,10 @@ def scan_signals_for(strategy_id: str, df: pd.DataFrame) -> list:
     from core.strategy_context import use_strategy
 
     with use_strategy(strategy_id):
+        if strategy_id == "hunting_funding":
+            from strategies.hunting_funding import scan_signals
+
+            return scan_signals(df)
         if strategy_id == "donchian":
             from strategies.donchian_multi_tp import scan_signals
 

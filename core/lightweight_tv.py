@@ -111,6 +111,7 @@ def markers_for_strategies(prep_for_tf: pd.DataFrame, strategy_ids: list[str]) -
         "donchian": "D",
         "rsi": "R",
         "macd": "M",
+        "hunting_funding": "H",
     }
 
     for sid in strategy_ids:

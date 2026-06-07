@@ -137,6 +137,38 @@ def build_trade_plan(
     )
 
 
+def build_hunting_trade_plan(side: str, entry: float, stop: float) -> TradePlan | None:
+    """Hunting Funding：波段止損 + 1R/3R/5R 目標。"""
+    risk = _risk_pct(entry, stop, side)
+    if risk > cfg.HUNTING_MAX_SL_PCT / 100.0:
+        return None
+    r = abs(entry - stop)
+    if r <= 0:
+        return None
+    if side == "long":
+        tp_1r = entry + r
+        tp_2r = entry + 3.0 * r
+        tp_final = entry + 5.0 * r
+    else:
+        tp_1r = entry - r
+        tp_2r = entry - 3.0 * r
+        tp_final = entry - 5.0 * r
+    margin = cfg.HUNTING_TOTAL_CAPITAL * cfg.HUNTING_POSITION_PCT / 100.0
+    size = margin / entry if entry > 0 else 0.0
+    return TradePlan(
+        side=side,
+        entry=entry,
+        stop=stop,
+        r=r,
+        tp_1r=tp_1r,
+        tp_2r=tp_2r,
+        tp_final=tp_final,
+        stop_source="hunting_swing",
+        risk_pct=risk,
+        position_size=size,
+    )
+
+
 def calc_donchian_position_size(entry: float, stop: float) -> float:
     """定損 2U：倉位數量 = 風險金額 / 每單位價格風險。"""
     per_unit = abs(entry - stop)

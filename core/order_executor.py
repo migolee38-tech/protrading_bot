@@ -13,7 +13,7 @@ import pandas as pd
 
 from core.backtest_report import run_backtest
 from core.market_data import MarketType, fetch_klines
-from core.strategy_registry import STRATEGIES, get_strategy, scan_signals_for
+from core.strategy_registry import STRATEGIES, get_strategy, scan_signals_for, with_symbol
 
 _ORDERS_FILE = Path(__file__).resolve().parent.parent / "data" / "paper_orders.json"
 _ORDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +118,7 @@ def scan_and_paper_trade(
                 raw = fetch_klines(bin_sym, interval=meta.timeframe, limit=kline_limit, market=market)
             except Exception:
                 continue
-            prep = meta.prepare_df(raw)
+            prep = meta.prepare_df(with_symbol(raw, bin_sym))
             signals = scan_signals_for(sid, prep)
             if not signals:
                 continue

@@ -296,3 +296,34 @@ def symbol_display(binance_symbol: str) -> str:
     if s.endswith("USDT"):
         return f"{s[:-4]}/USDT"
     return s
+
+
+def fetch_open_interest_history(
+    symbol: str,
+    interval: str,
+    limit: int = 500,
+) -> pd.Series:
+    """永續未平倉量歷史；與 K 線 datetime 對齊後使用。"""
+    period_map = {
+        "1m": "5m", "3m": "5m", "5m": "5m", "15m": "15m",
+        "30m": "30m", "1h": "1h", "2h": "2h", "4h": "4h",
+        "6h": "6h", "12h": "12h", "1d": "1d",
+    }
+    period = period_map.get(interval, "5m")
+    sym = symbol.replace("/", "").upper()
+    url = f"{FUTURES_BASE}/futures/data/openInterestHist"
+    params = {"symbol": sym, "period": period, "limit": min(limit, 500)}
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException:
+        return pd.Series(dtype=float)
+    if not data:
+        return pd.Series(dtype=float)
+    return pd.Series(
+        {
+            pd.Timestamp(d["timestamp"], unit="ms", tz="UTC"): float(d["sumOpenInterest"])
+            for d in data
+        }
+    )

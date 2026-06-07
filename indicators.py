@@ -51,6 +51,14 @@ def add_macd(
 
 
 def min_bars_required() -> int:
+    if cfg.STRATEGY == "hunting_funding":
+        return (
+            cfg.HUNTING_HTF_EMA_LEN
+            + cfg.HUNTING_SL_SWING
+            + cfg.HUNTING_COOLDOWN_BARS
+            + cfg.HUNTING_LOOKBACK
+            + 10
+        )
     if cfg.STRATEGY == "donchian":
         return cfg.DONCHIAN_LEN + cfg.DONCHIAN_ENTRY_EXPIRE_BARS + 8
     if cfg.STRATEGY == "rsi":
