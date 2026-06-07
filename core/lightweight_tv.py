@@ -136,7 +136,12 @@ def markers_for_strategies(prep_for_tf: pd.DataFrame, strategy_ids: list[str]) -
         meta = STRATEGIES.get(sid)
         if meta is None:
             continue
-        sigs = scan_signals_for(sid, prep_for_tf)
+        if sid == "hunting_funding":
+            from strategies.hunting_funding import scan_raw_signals
+
+            sigs = scan_raw_signals(prep_for_tf)
+        else:
+            sigs = scan_signals_for(sid, prep_for_tf)
         tag = strat_labels.get(sid, sid[:3].upper())
         for sig in sigs:
             idx = getattr(sig, "bar_index", 0)

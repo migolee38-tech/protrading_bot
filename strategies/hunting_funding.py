@@ -491,7 +491,40 @@ def compute_bar_results(df: pd.DataFrame) -> list[BarResult]:
     return HuntingEngine().compute(df)
 
 
+def scan_raw_signals(df: pd.DataFrame) -> list[Signal]:
+    """所有 raw 觸發（long_sig / short_sig），供圖表 markers；不含單倉與方向冷卻過濾。"""
+    results = compute_bar_results(df)
+    signals: list[Signal] = []
+    for bar in results:
+        if bar.long_sig:
+            plan = build_hunting_trade_plan("long", bar.close, bar.sl_long)
+            if plan:
+                signals.append(
+                    Signal(
+                        bar_index=bar.bar_index,
+                        side="long",
+                        entry=bar.close,
+                        plan=plan,
+                        stars=bar.stars_l,
+                    )
+                )
+        if bar.short_sig:
+            plan = build_hunting_trade_plan("short", bar.close, bar.sl_short)
+            if plan:
+                signals.append(
+                    Signal(
+                        bar_index=bar.bar_index,
+                        side="short",
+                        entry=bar.close,
+                        plan=plan,
+                        stars=bar.stars_s,
+                    )
+                )
+    return signals
+
+
 def scan_signals(df: pd.DataFrame) -> list[Signal]:
+    """有效進場訊號（simulate_trades · 同時僅一倉）。"""
     results = compute_bar_results(df)
     _, entry_signals = simulate_trades(df, results)
     return entry_signals

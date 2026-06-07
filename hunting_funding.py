@@ -989,9 +989,9 @@ def parse_args():
     p.add_argument("--max-sl-pct",    type=float, default=5.0)
     p.add_argument("--max-consecutive-sl-dir", type=int, default=2,
                    help="同方向連續止損 N 次後冷卻")
-    p.add_argument("--no-direction-cooldown", dest="use_direction_cooldown",
-                   action="store_false", default=True,
-                   help="關閉方向冷卻（連續止損停單）")
+    p.add_argument("--direction-cooldown", dest="use_direction_cooldown",
+                   action="store_true", default=False,
+                   help="啟用方向冷卻（同方向連續止損 N 次後暫停）")
     p.add_argument("--backtest-limit",type=int,   default=1000)
     p.add_argument("--auto-trade",    action="store_true", default=False)
     p.add_argument("--testnet",       action="store_true", default=True)
