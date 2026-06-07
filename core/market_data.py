@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import pandas as pd
@@ -298,11 +299,37 @@ def symbol_display(binance_symbol: str) -> str:
     return s
 
 
+@dataclass
+class OIFetchResult:
+    """Binance 未平倉量歷史抓取結果（含錯誤訊息供 UI 顯示）。"""
+    series: pd.Series
+    ok: bool = True
+    error: str = ""
+    http_status: int | None = None
+    fetched_count: int = 0
+    symbol: str = ""
+    period: str = ""
+    source: str = "fapi:/futures/data/openInterestHist"
+
+
+def _oi_error_message(exc: requests.RequestException, http_status: int | None) -> str:
+    if http_status == 451:
+        return (
+            "HTTP 451：目前地區或主機無法連線 Binance 永續 API。"
+            "請改用亞洲機房（如 Zeabur Singapore）或本機執行。"
+        )
+    if http_status == 403:
+        return "HTTP 403：Binance API 拒絕連線，請稍後重試或檢查 IP 限制。"
+    if http_status:
+        return f"HTTP {http_status}：{exc}"
+    return f"連線失敗：{exc}"
+
+
 def fetch_open_interest_history(
     symbol: str,
     interval: str,
     limit: int = 500,
-) -> pd.Series:
+) -> OIFetchResult:
     """永續未平倉量歷史；與 K 線 datetime 對齊後使用。"""
     period_map = {
         "1m": "5m", "3m": "5m", "5m": "5m", "15m": "15m",
@@ -313,17 +340,40 @@ def fetch_open_interest_history(
     sym = symbol.replace("/", "").upper()
     url = f"{FUTURES_BASE}/futures/data/openInterestHist"
     params = {"symbol": sym, "period": period, "limit": min(limit, 500)}
+    empty = pd.Series(dtype=float)
     try:
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-    except requests.RequestException:
-        return pd.Series(dtype=float)
+    except requests.RequestException as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        return OIFetchResult(
+            series=empty,
+            ok=False,
+            error=_oi_error_message(exc, status),
+            http_status=status,
+            symbol=sym,
+            period=period,
+        )
     if not data:
-        return pd.Series(dtype=float)
-    return pd.Series(
+        return OIFetchResult(
+            series=empty,
+            ok=False,
+            error=f"API 回傳空資料（{sym} · period={period}）",
+            http_status=200,
+            symbol=sym,
+            period=period,
+        )
+    series = pd.Series(
         {
             pd.Timestamp(d["timestamp"], unit="ms", tz="UTC"): float(d["sumOpenInterest"])
             for d in data
         }
+    )
+    return OIFetchResult(
+        series=series,
+        ok=True,
+        fetched_count=len(series),
+        symbol=sym,
+        period=period,
     )

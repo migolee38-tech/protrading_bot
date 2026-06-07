@@ -77,6 +77,7 @@ HUNTING_TOTAL_CAPITAL = 100.0
 HUNTING_POSITION_PCT = 2.0
 HUNTING_USE_DIRECTION_COOLDOWN = True
 HUNTING_MAX_CONSECUTIVE_SL_DIR = 2
+HUNTING_OI_MAX_HIST = 500          # Binance openInterestHist 單次上限
 
 
 def active_timeframe() -> str:

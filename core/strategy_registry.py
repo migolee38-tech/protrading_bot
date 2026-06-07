@@ -46,10 +46,16 @@ def _patch_strategy(strategy_id: str):
     return use_strategy(strategy_id)
 
 
-def with_symbol(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """附加 symbol 至 attrs，供 Hunting Funding 等策略抓取 OI。"""
+def with_symbol(
+    raw: pd.DataFrame,
+    symbol: str,
+    kline_limit: int | None = None,
+) -> pd.DataFrame:
+    """附加 symbol / kline_limit 至 attrs，供 Hunting Funding 抓取 OI。"""
     out = raw.copy()
     out.attrs["symbol"] = symbol.replace("/", "").upper()
+    if kline_limit is not None:
+        out.attrs["kline_limit"] = int(kline_limit)
     if hasattr(raw, "attrs") and "price_source" in raw.attrs:
         out.attrs["price_source"] = raw.attrs["price_source"]
     return out

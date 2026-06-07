@@ -12,8 +12,10 @@ import numpy as np
 import pandas as pd
 
 import config as cfg
-from core.market_data import fetch_open_interest_history
+from core.market_data import OIFetchResult, fetch_open_interest_history
 from risk import TradePlan, build_hunting_trade_plan
+
+OI_STATUS_ATTR = "hunting_oi_status"
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,22 @@ class SimTrade:
     pnl_r: float = 0.0
 
 
+@dataclass(frozen=True)
+class OIDataStatus:
+    """OI 對齊與資料來源狀態（供儀表板顯示）。"""
+    valid_pct: float
+    valid_bars: int
+    total_bars: int
+    fetched_points: int
+    ok: bool
+    error: str
+    http_status: int | None
+    symbol: str
+    oi_period: str
+    kline_limit: int
+    kline_limit_warning: str
+
+
 @dataclass
 class DirectionCooldownState:
     long_blocked: bool = False
@@ -103,21 +121,65 @@ def calc_exit_levels(entry: float, sl: float, direction: str) -> dict[str, float
     return {"risk": risk, "sl": sl, "r1": entry - risk, "r3": entry - risk * 3, "r5": entry - risk * 5}
 
 
+def _kline_limit_warning(kline_limit: int, total_bars: int) -> str:
+    cap = cfg.HUNTING_OI_MAX_HIST
+    if kline_limit <= cap:
+        return ""
+    extra = max(kline_limit, total_bars) - cap
+    return (
+        f"K 線設定 {kline_limit} 根超過 OI 歷史上限 {cap} 筆，"
+        f"較舊約 {extra} 根 K 線可能無 OI 資料，五星評分中 OI 因子可能失效。"
+    )
+
+
+def _build_oi_status(
+    out: pd.DataFrame,
+    fetch: OIFetchResult,
+    symbol: str,
+    kline_limit: int,
+) -> OIDataStatus:
+    total = len(out)
+    valid = int(out["oi"].notna().sum()) if "oi" in out.columns else 0
+    valid_pct = (valid / total * 100.0) if total else 0.0
+    error = fetch.error
+    if fetch.ok and valid == 0 and not error:
+        error = "OI 與 K 線時間對齊後無有效資料，請確認使用永續合約與 5m 週期。"
+    return OIDataStatus(
+        valid_pct=valid_pct,
+        valid_bars=valid,
+        total_bars=total,
+        fetched_points=fetch.fetched_count,
+        ok=fetch.ok and valid > 0,
+        error=error,
+        http_status=fetch.http_status,
+        symbol=symbol,
+        oi_period=fetch.period,
+        kline_limit=kline_limit,
+        kline_limit_warning=_kline_limit_warning(kline_limit, total),
+    )
+
+
+def load_oi_status(df: pd.DataFrame) -> OIDataStatus | None:
+    status = df.attrs.get(OI_STATUS_ATTR)
+    return status if isinstance(status, OIDataStatus) else None
+
+
 def prepare_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
-    """合併 OI 欄位；需 raw.attrs['symbol']。"""
+    """合併 OI 欄位；需 raw.attrs['symbol']，可選 raw.attrs['kline_limit']。"""
     out = raw.copy()
     symbol = str(out.attrs.get("symbol", "BTCUSDT")).replace("/", "").upper()
+    kline_limit = int(out.attrs.get("kline_limit", len(out)))
     interval = cfg.HUNTING_FUNDING_TIMEFRAME
     ts = _time_series(out)
-    try:
-        oi = fetch_open_interest_history(symbol, interval, limit=500)
-        if oi.empty:
-            out["oi"] = np.nan
-        else:
-            aligned = oi.reindex(pd.DatetimeIndex(ts), method="ffill")
-            out["oi"] = aligned.values
-    except Exception:
+
+    fetch = fetch_open_interest_history(symbol, interval, limit=cfg.HUNTING_OI_MAX_HIST)
+    if not fetch.ok or fetch.series.empty:
         out["oi"] = np.nan
+    else:
+        aligned = fetch.series.reindex(pd.DatetimeIndex(ts), method="ffill")
+        out["oi"] = aligned.values
+
+    out.attrs[OI_STATUS_ATTR] = _build_oi_status(out, fetch, symbol, kline_limit)
     return out
 
 

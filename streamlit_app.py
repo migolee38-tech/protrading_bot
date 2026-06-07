@@ -46,6 +46,7 @@ from core.order_executor import (
     scan_and_paper_trade,
 )
 from core.strategy_registry import STRATEGIES, scan_signals_for, with_symbol
+from strategies.hunting_funding import load_oi_status
 from core.universe import top_usdt_pairs_by_volume, universe_price_source_label
 
 REPORTS_DIR = Path(__file__).parent / "data" / "reports"
@@ -289,6 +290,14 @@ def _sidebar_panel(market: MarketType) -> tuple[int, int, pd.DataFrame]:
         step=100,
         key="sidebar_kline_limit",
     )
+    if (
+        "hunting_funding" in st.session_state.get("active_strategy_ids", [])
+        and kline_limit > 500
+    ):
+        st.sidebar.warning(
+            "Hunting Funding：K 線 > 500 時，OI 歷史僅覆蓋最近 500 根，"
+            "較舊 K 線可能無 OI 資料。"
+        )
     st.sidebar.caption("回測 → 模擬 → 實盤（需 API + 手動確認）")
 
     universe_df = _cached_universe(top_n, market)
@@ -389,12 +398,64 @@ def _sticky_top_toolbar(
     return _top_toolbar(universe_df)
 
 
+def _render_hunting_oi_status(
+    raw: pd.DataFrame,
+    sym: str,
+    kline_limit: int,
+    market: MarketType,
+    strategy_ids: list[str],
+) -> None:
+    """Hunting Funding：OI 資料來源狀態面板。"""
+    if "hunting_funding" not in strategy_ids:
+        return
+
+    st.markdown("**Hunting Funding · OI 資料狀態**")
+
+    if market != "futures":
+        st.error(
+            "Hunting Funding 需要 **永續合約 (futures)** 的 OI 資料。"
+            "請於頂部將市場切換為「永續」。"
+        )
+        return
+
+    meta = STRATEGIES["hunting_funding"]
+    prep = meta.prepare_df(with_symbol(raw, sym, kline_limit=kline_limit))
+    status = load_oi_status(prep)
+    if status is None:
+        st.warning("無法讀取 OI 狀態（資料準備未完成）。")
+        return
+
+    if status.error:
+        detail = status.error
+        if status.http_status:
+            detail = f"[HTTP {status.http_status}] {detail}"
+        st.error(f"OI API 錯誤：{detail}")
+
+    if status.kline_limit_warning:
+        st.warning(status.kline_limit_warning)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("OI 有效", f"{status.valid_pct:.1f}%")
+    c2.metric("有效 K 線", f"{status.valid_bars} / {status.total_bars}")
+    c3.metric("OI 歷史筆數", status.fetched_points)
+    c4.metric("OI 週期", status.oi_period or "—")
+
+    if status.ok:
+        st.caption(
+            f"來源：Binance `openInterestHist` · {status.symbol} · "
+            f"已對齊 {status.valid_bars} 根 K 線"
+        )
+    elif not status.error:
+        st.warning("OI 資料不可用，策略將略過 OI 因子計分。")
+
+
 def _signal_chips(
     raw: pd.DataFrame,
     sym: str,
     strategy_ids: list[str],
     chart_tf: str,
     chart_highlight: str,
+    kline_limit: int,
 ) -> None:
     """條件觸發狀態：多策略摘要，高亮策略單獨標示。"""
     sig_ids = [s for s in strategy_ids if STRATEGIES[s].timeframe == chart_tf]
@@ -404,7 +465,7 @@ def _signal_chips(
 
     chips: list[str] = []
     for sid in sig_ids:
-        prep = STRATEGIES[sid].prepare_df(with_symbol(raw, sym))
+        prep = STRATEGIES[sid].prepare_df(with_symbol(raw, sym, kline_limit=kline_limit))
         sigs = scan_signals_for(sid, prep)
         name = STRATEGIES[sid].name
         if not sigs:
@@ -678,7 +739,7 @@ def _render_chart_block(
     # 避免高亮到當下無訊號的策略（如 EMA）時整張圖看不到任何標記。
     shown_ids = strategy_ids or [chart_highlight]
     for sid in shown_ids:
-        prep_s = STRATEGIES[sid].prepare_df(with_symbol(raw, sym))
+        prep_s = STRATEGIES[sid].prepare_df(with_symbol(raw, sym, kline_limit=kline_limit))
         markers.extend(markers_for_strategies(prep_s, [sid]))
     orders_df = list_paper_orders()
     markers.extend(markers_for_open_orders(orders_df, sym, candles))
@@ -751,7 +812,8 @@ def _main_workstation(
                 hi_name,
                 live_futures_server=False,
             )
-            _signal_chips(raw, sym, strategy_ids, chart_tf, chart_highlight)
+            _render_hunting_oi_status(raw, sym, kline_limit, market, strategy_ids)
+            _signal_chips(raw, sym, strategy_ids, chart_tf, chart_highlight, kline_limit)
             if STRATEGIES[chart_highlight].timeframe != chart_tf:
                 st.caption(
                     f"圖表週期 {chart_tf} 與高亮策略週期 "
@@ -772,6 +834,14 @@ def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int)
     sym = st.session_state.selected_symbol
     pair = st.session_state.selected_pair
     st.caption(f"目前交易對：{pair}（{sym}）· 策略來自主工作站側欄／頂部多選")
+
+    if "hunting_funding" in strategy_ids:
+        try:
+            hf_tf = STRATEGIES["hunting_funding"].timeframe
+            raw_oi, _ = _cached_klines(sym, hf_tf, kline_limit, market)
+            _render_hunting_oi_status(raw_oi, sym, kline_limit, market, strategy_ids)
+        except Exception as exc:
+            st.error(f"無法檢查 Hunting Funding OI 狀態：{exc}")
 
     if st.button("執行回測（目前交易對 × 已選策略）", type="primary", key="tab_bt_run"):
         if not strategy_ids:
