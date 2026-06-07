@@ -44,6 +44,7 @@ class TradingEngine:
     log: EngineLog = field(default_factory=EngineLog)
     bar_minutes: int = field(default_factory=cfg.timeframe_minutes)
     _pending: Any = field(default=None, init=False, repr=False)
+    pnl_ledger: Any = field(default=None, repr=False)
 
     def _bar_time(self, bar_index: int) -> datetime:
         base = datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -60,7 +61,12 @@ class TradingEngine:
         if not pos or pos.closed or pos.size <= 0:
             return False
 
+        size_before = pos.size
         events = pos.on_bar(high, low)
+        if self.pnl_ledger is not None:
+            from core.backtest_pnl import record_position_bar_pnl
+
+            record_position_bar_pnl(self.pnl_ledger, pos, size_before, events)
         for ev in events:
             self.log.add(f"[{i}] {ev}")
         if "stop_loss" in events:
@@ -166,6 +172,8 @@ class TradingEngine:
     def _open_ema(self, sig: EmaSignal, bar_index: int) -> None:
         p = sig.plan
         self.portfolio.open_position(self.symbol, p)
+        if self.pnl_ledger is not None:
+            self.pnl_ledger.on_position_opened()
         self.log.add(
             f"[{bar_index}] open {sig.side} entry={p.entry:.4f} "
             f"stop={p.stop:.4f} tp_1r={p.tp_1r:.4f} tp_2r={p.tp_2r:.4f} "
@@ -175,6 +183,8 @@ class TradingEngine:
     def _open_donchian(self, sig: DonchianSignal, bar_index: int) -> None:
         p = sig.plan
         self.portfolio.open_position(self.symbol, p)
+        if self.pnl_ledger is not None:
+            self.pnl_ledger.on_position_opened()
         self.log.add(
             f"[{bar_index}] open {sig.side} entry={p.entry:.4f} "
             f"stop={p.stop:.4f} tp_2r={p.tp_1r:.4f} tp_5r={p.tp_2r:.4f} "

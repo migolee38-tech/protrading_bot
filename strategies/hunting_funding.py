@@ -444,7 +444,7 @@ def _can_enter(state: DirectionCooldownState, direction: str) -> bool:
 
 def simulate_trades(
     df: pd.DataFrame, results: list[BarResult],
-) -> tuple[list[SimTrade], list[Signal]]:
+) -> tuple[list[SimTrade], list[Signal], list[OpenPosition]]:
     """分倉模擬：每 raw 訊號可開獨立 leg（多空可並存），各自 1R/3R/5R 出場。"""
     trades: list[SimTrade] = []
     entry_signals: list[Signal] = []
@@ -503,7 +503,7 @@ def simulate_trades(
                 pnl_r=leg.realized_r,
             )
         )
-    return trades, entry_signals
+    return trades, entry_signals, open_legs
 
 
 def compute_bar_results(df: pd.DataFrame) -> list[BarResult]:
@@ -545,20 +545,24 @@ def scan_raw_signals(df: pd.DataFrame) -> list[Signal]:
 def scan_signals(df: pd.DataFrame) -> list[Signal]:
     """實際建倉訊號（simulate_trades · 分倉 · 受倉數/保證金上限）。"""
     results = compute_bar_results(df)
-    _, entry_signals = simulate_trades(df, results)
+    _, entry_signals, _ = simulate_trades(df, results)
     return entry_signals
 
 
 def run_dashboard_backtest(df: pd.DataFrame) -> dict:
     """供 backtest_report 使用的統計摘要。"""
+    from core.backtest_pnl import summarize_hunting_pnl
+
     results = compute_bar_results(df)
     raw_signals = sum(1 for r in results if r.long_sig or r.short_sig)
-    trades, _ = simulate_trades(df, results)
+    trades, _, open_legs = simulate_trades(df, results)
     closed = [t for t in trades if t.result != "OPEN"]
     wins = sum(1 for t in closed if t.pnl_r > 0)
     losses = sum(1 for t in closed if t.pnl_r < 0)
     closed_n = wins + losses
     win_rate = (wins / closed_n) if closed_n else 0.0
+    last_close = float(df.iloc[-1]["close"])
+    pnl = summarize_hunting_pnl(trades, open_legs, last_close)
     events = [
         f"[{t.bar_index}] open {t.direction.lower()} @ {t.entry_price:.6g} sl={t.sl:.6g}"
         for t in trades
@@ -573,4 +577,5 @@ def run_dashboard_backtest(df: pd.DataFrame) -> dict:
         "losses": losses,
         "win_rate": win_rate,
         "events": events,
+        **pnl.to_dict(),
     }

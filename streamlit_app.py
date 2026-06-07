@@ -872,8 +872,18 @@ def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int)
 
     df = st.session_state["last_backtest"]
     st.dataframe(df, use_container_width=True)
+
+    m1, m2, m3, m4 = st.columns(4)
     avg_wr = df["win_rate_pct"].mean() if len(df) and "win_rate_pct" in df.columns else 0
-    st.metric("平均勝率（已平倉事件估算）", f"{avg_wr:.1f}%")
+    m1.metric("平均勝率", f"{avg_wr:.1f}%")
+    if "profit_factor" in df.columns:
+        avg_pf = df["profit_factor"].replace(9999.0, float("nan")).mean()
+        pf_label = f"{avg_pf:.2f}" if pd.notna(avg_pf) else "—"
+        m2.metric("平均獲利因子", pf_label)
+    if "total_pnl_usdt" in df.columns:
+        m3.metric("總盈虧 (USDT)", f"{df['total_pnl_usdt'].sum():.4f}")
+    if "unrealized_pnl_usdt" in df.columns:
+        m4.metric("未平倉盈虧 (USDT)", f"{df['unrealized_pnl_usdt'].sum():.4f}")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_path = REPORTS_DIR / f"backtest_{sym}_{ts}.json"

@@ -25,9 +25,14 @@ class BacktestResult:
     win_count: int
     loss_count: int
     win_rate: float
+    profit_factor: float = 0.0
+    realized_pnl_usdt: float = 0.0
+    unrealized_pnl_usdt: float = 0.0
+    total_pnl_usdt: float = 0.0
     events: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        pf = self.profit_factor
         return {
             "strategy": self.strategy_id,
             "symbol": self.symbol,
@@ -38,6 +43,10 @@ class BacktestResult:
             "wins": self.win_count,
             "losses": self.loss_count,
             "win_rate_pct": round(self.win_rate * 100, 2),
+            "profit_factor": round(pf, 4) if pf != float("inf") else 9999.0,
+            "realized_pnl_usdt": round(self.realized_pnl_usdt, 4),
+            "unrealized_pnl_usdt": round(self.unrealized_pnl_usdt, 4),
+            "total_pnl_usdt": round(self.total_pnl_usdt, 4),
         }
 
 
@@ -96,6 +105,10 @@ def _run_hunting_backtest(
         win_count=stats["wins"],
         loss_count=stats["losses"],
         win_rate=stats["win_rate"],
+        profit_factor=stats.get("profit_factor", 0.0),
+        realized_pnl_usdt=stats.get("realized_pnl_usdt", 0.0),
+        unrealized_pnl_usdt=stats.get("unrealized_pnl_usdt", 0.0),
+        total_pnl_usdt=stats.get("total_pnl_usdt", 0.0),
         events=stats["events"],
     )
 
@@ -130,12 +143,15 @@ def run_backtest(
                 events=[f"K 線不足，需要至少 {need} 根"],
             )
 
+        from core.backtest_pnl import BacktestLedger, summarize_engine_pnl
         from core.strategy_registry import scan_signals_for
 
         signals = scan_signals_for(strategy_id, df)
         tf_min = cfg.timeframe_minutes(meta.timeframe)
         engine = TradingEngine(symbol=symbol, bar_minutes=tf_min)
+        engine.pnl_ledger = BacktestLedger()
         log = engine.run(df)
+        pnl = summarize_engine_pnl(engine, df)
 
     opens, wins, losses = _parse_stats(log.entries)
     closed = wins + losses
@@ -151,6 +167,10 @@ def run_backtest(
         win_count=wins,
         loss_count=losses,
         win_rate=win_rate,
+        profit_factor=pnl.profit_factor,
+        realized_pnl_usdt=pnl.realized_pnl_usdt,
+        unrealized_pnl_usdt=pnl.unrealized_pnl_usdt,
+        total_pnl_usdt=pnl.total_pnl_usdt,
         events=log.entries,
     )
 
