@@ -104,7 +104,9 @@ class Config:
     # ── 自動交易 ─────────────────────────────────────────────────
     auto_trade: bool   = False         # 開啟才會真實下單
     total_capital: float = 100.0       # 總資金 USDT
-    position_pct: float  = 2.0         # 每單保證金佔總資金 %
+    position_pct: float  = 1.0         # 每 leg 保證金佔總資金 %
+    max_concurrent_positions: int = 20
+    max_margin_usage_pct: float = 85.0 # 已用保證金超過此比例則拒絕新單
     leverage: int      = 0             # 0 = 使用該交易對最大槓桿
 
     @property
@@ -121,7 +123,7 @@ class Config:
     tg_chat_id: str    = ""
 
     # ── 方向冷卻（連續止損）──────────────────────────────────────
-    use_direction_cooldown: bool = True
+    use_direction_cooldown: bool = False
     max_consecutive_sl_dir: int  = 2   # 同方向連續止損 N 次後冷卻
 
     # ── 回測設定 ─────────────────────────────────────────────────
@@ -487,7 +489,22 @@ def _process_bar_exits(
     return None
 
 
-def _open_position(direction: str, entry_time: pd.Timestamp, entry: float, sl: float) -> OpenPosition:
+def _margin_per_leg(cfg: Config) -> float:
+    return cfg.total_capital * cfg.position_pct / 100.0
+
+
+def _can_open_more_legs(cfg: Config, open_count: int) -> bool:
+    if open_count >= cfg.max_concurrent_positions:
+        return False
+    per = _margin_per_leg(cfg)
+    used = open_count * per
+    cap = cfg.total_capital * cfg.max_margin_usage_pct / 100.0
+    return used + per <= cap + 1e-9
+
+
+def _open_position(
+    direction: str, entry_time: pd.Timestamp, entry: float, sl: float, bar_index: int = 0,
+) -> OpenPosition:
     lv = calc_exit_levels(entry, sl, direction)
     return OpenPosition(
         direction=direction,
@@ -557,69 +574,84 @@ def _can_enter_direction(
     return not state.short_blocked
 
 
+def _try_open_leg_cli(
+    bar: BarResult,
+    direction: str,
+    sl: float,
+    open_legs: list[OpenPosition],
+    cfg: Config,
+) -> None:
+    if not _can_open_more_legs(cfg, len(open_legs)):
+        return
+    if np.isnan(sl):
+        return
+    open_legs.append(_open_position(direction, bar.ts, bar.close, sl))
+
+
 def _simulate_trades(
     results: list[BarResult],
     df: pd.DataFrame,
     cfg: Config,
 ) -> tuple[list[Trade], DirectionCooldownState, bool, bool]:
     """
-    模擬交易並套用方向冷卻。
+    分倉模擬：每 raw 訊號可開獨立 leg（多空可並存），各自 1R/3R/5R 出場。
     回傳 (trades, 最終冷卻狀態, 最後一根有效多單訊號, 最後一根有效空單訊號)
     """
     trades: list[Trade] = []
-    open_pos: Optional[OpenPosition] = None
+    open_legs: list[OpenPosition] = []
     cd = DirectionCooldownState()
     eff_long = eff_short = False
 
     for i, bar in enumerate(results):
         row = df.iloc[i]
-
-        if open_pos is not None:
-            closed = _process_bar_exits(open_pos, row["high"], row["low"], cfg.tp1_reduce_pct)
+        still_open: list[OpenPosition] = []
+        for leg in open_legs:
+            closed = _process_bar_exits(leg, row["high"], row["low"], cfg.tp1_reduce_pct)
             if closed is not None:
                 pnl_r, result = closed
                 if cfg.use_direction_cooldown:
                     _record_direction_close(
-                        cd, open_pos.direction, result, cfg.max_consecutive_sl_dir,
+                        cd, leg.direction, result, cfg.max_consecutive_sl_dir,
                     )
                 trades.append(Trade(
-                    direction=open_pos.direction,
-                    entry_time=open_pos.entry_time,
-                    entry_price=open_pos.entry_price,
-                    sl=open_pos.initial_sl,
-                    r1=open_pos.r1,
-                    r3=open_pos.r3,
-                    r5=open_pos.r5,
+                    direction=leg.direction,
+                    entry_time=leg.entry_time,
+                    entry_price=leg.entry_price,
+                    sl=leg.initial_sl,
+                    r1=leg.r1,
+                    r3=leg.r3,
+                    r5=leg.r5,
                     exit_time=bar.ts,
                     exit_price=row["close"],
                     result=result,
                     pnl_r=pnl_r,
                 ))
-                open_pos = None
+            else:
+                still_open.append(leg)
+        open_legs = still_open
 
         if cfg.use_direction_cooldown:
             _unlock_on_opposite_signal(cd, bar)
 
-        eff_long = bar.long_sig and _can_enter_direction(cd, "LONG", True)
-        eff_short = bar.short_sig and _can_enter_direction(cd, "SHORT", True)
+        eff_long = bar.long_sig and _can_enter_direction(cd, "LONG", cfg.use_direction_cooldown)
+        eff_short = bar.short_sig and _can_enter_direction(cd, "SHORT", cfg.use_direction_cooldown)
 
-        if open_pos is None:
-            if eff_long:
-                open_pos = _open_position("LONG", bar.ts, bar.close, bar.sl_long)
-            elif eff_short:
-                open_pos = _open_position("SHORT", bar.ts, bar.close, bar.sl_short)
+        if eff_long:
+            _try_open_leg_cli(bar, "LONG", bar.sl_long, open_legs, cfg)
+        if eff_short:
+            _try_open_leg_cli(bar, "SHORT", bar.sl_short, open_legs, cfg)
 
-    if open_pos is not None:
+    for leg in open_legs:
         trades.append(Trade(
-            direction=open_pos.direction,
-            entry_time=open_pos.entry_time,
-            entry_price=open_pos.entry_price,
-            sl=open_pos.initial_sl,
-            r1=open_pos.r1,
-            r3=open_pos.r3,
-            r5=open_pos.r5,
+            direction=leg.direction,
+            entry_time=leg.entry_time,
+            entry_price=leg.entry_price,
+            sl=leg.initial_sl,
+            r1=leg.r1,
+            r3=leg.r3,
+            r5=leg.r5,
             result="OPEN",
-            pnl_r=open_pos.realized_r,
+            pnl_r=leg.realized_r,
         ))
 
     return trades, cd, eff_long, eff_short
@@ -997,8 +1029,12 @@ def parse_args():
     p.add_argument("--testnet",       action="store_true", default=True)
     p.add_argument("--total-capital", type=float, default=100.0,
                    help="總資金 USDT")
-    p.add_argument("--position-pct",  type=float, default=2.0,
-                   help="每單保證金佔總資金 %")
+    p.add_argument("--position-pct",  type=float, default=1.0,
+                   help="每 leg 保證金佔總資金 %")
+    p.add_argument("--max-concurrent-positions", type=int, default=20,
+                   help="同時最多持倉 leg 數")
+    p.add_argument("--max-margin-usage-pct", type=float, default=85.0,
+                   help="已用保證金超過總資金此比例則拒絕新單")
     p.add_argument("--leverage",      type=int,   default=0,
                    help="槓桿倍數，0=使用交易對最大槓桿")
     p.add_argument("--api-key",    default=os.getenv("BINANCE_API_KEY",""))
@@ -1028,6 +1064,8 @@ def main():
         testnet          = args.testnet,
         total_capital    = args.total_capital,
         position_pct     = args.position_pct,
+        max_concurrent_positions = args.max_concurrent_positions,
+        max_margin_usage_pct     = args.max_margin_usage_pct,
         leverage         = args.leverage,
         api_key          = args.api_key,
         api_secret       = args.api_secret,

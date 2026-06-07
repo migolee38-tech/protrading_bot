@@ -1,6 +1,7 @@
 """
 Hunting Funding — OI/CVD/量能/趨勢/動能五星評分策略。
 供儀表板（scan_signals）與 CLI（hunting_funding.py）共用。
+分倉模式：每 raw 訊號可開獨立 leg（多空可並存），受倉數/保證金上限約束。
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ class OpenPosition:
     r1: float
     r3: float
     r5: float
+    entry_bar_index: int = 0
     remaining: float = 1.0
     realized_r: float = 0.0
     stage: int = 0
@@ -360,6 +362,19 @@ def _process_bar_exits(
     return None
 
 
+def _margin_per_leg() -> float:
+    return cfg.HUNTING_TOTAL_CAPITAL * cfg.HUNTING_POSITION_PCT / 100.0
+
+
+def _can_open_more_legs(open_count: int) -> bool:
+    if open_count >= cfg.HUNTING_MAX_CONCURRENT_POSITIONS:
+        return False
+    per = _margin_per_leg()
+    used = open_count * per
+    cap = cfg.HUNTING_TOTAL_CAPITAL * cfg.HUNTING_MAX_MARGIN_USAGE_PCT / 100.0
+    return used + per <= cap + 1e-9
+
+
 def _open_position(direction: str, entry_time: pd.Timestamp, entry: float, sl: float, bar_index: int) -> OpenPosition:
     lv = calc_exit_levels(entry, sl, direction)
     return OpenPosition(
@@ -371,7 +386,28 @@ def _open_position(direction: str, entry_time: pd.Timestamp, entry: float, sl: f
         r1=lv["r1"],
         r3=lv["r3"],
         r5=lv["r5"],
+        entry_bar_index=bar_index,
     )
+
+
+def _try_open_leg(
+    bar: BarResult,
+    side: str,
+    sl: float,
+    stars: int,
+    open_legs: list[OpenPosition],
+    entry_signals: list[Signal],
+) -> None:
+    if not _can_open_more_legs(len(open_legs)):
+        return
+    plan = build_hunting_trade_plan(side, bar.close, sl)
+    if not plan:
+        return
+    direction = "LONG" if side == "long" else "SHORT"
+    entry_signals.append(
+        Signal(bar_index=bar.bar_index, side=side, entry=bar.close, plan=plan, stars=stars)
+    )
+    open_legs.append(_open_position(direction, bar.ts, bar.close, sl, bar.bar_index))
 
 
 def _unlock_on_opposite_signal(state: DirectionCooldownState, bar: BarResult) -> None:
@@ -409,79 +445,62 @@ def _can_enter(state: DirectionCooldownState, direction: str) -> bool:
 def simulate_trades(
     df: pd.DataFrame, results: list[BarResult],
 ) -> tuple[list[SimTrade], list[Signal]]:
+    """分倉模擬：每 raw 訊號可開獨立 leg（多空可並存），各自 1R/3R/5R 出場。"""
     trades: list[SimTrade] = []
     entry_signals: list[Signal] = []
-    open_pos: Optional[OpenPosition] = None
+    open_legs: list[OpenPosition] = []
     cd = DirectionCooldownState()
-    entry_bar_index = 0
 
     for i, bar in enumerate(results):
         row = df.iloc[i]
-        if open_pos is not None:
-            closed = _process_bar_exits(open_pos, row["high"], row["low"], cfg.HUNTING_TP1_REDUCE_PCT)
+        still_open: list[OpenPosition] = []
+        for leg in open_legs:
+            closed = _process_bar_exits(leg, row["high"], row["low"], cfg.HUNTING_TP1_REDUCE_PCT)
             if closed is not None:
                 pnl_r, result = closed
                 if cfg.HUNTING_USE_DIRECTION_COOLDOWN:
-                    _record_direction_close(cd, open_pos.direction, result)
+                    _record_direction_close(cd, leg.direction, result)
                 trades.append(
                     SimTrade(
-                        direction=open_pos.direction,
-                        entry_time=open_pos.entry_time,
-                        entry_price=open_pos.entry_price,
-                        sl=open_pos.initial_sl,
-                        r1=open_pos.r1,
-                        r3=open_pos.r3,
-                        r5=open_pos.r5,
-                        bar_index=entry_bar_index,
+                        direction=leg.direction,
+                        entry_time=leg.entry_time,
+                        entry_price=leg.entry_price,
+                        sl=leg.initial_sl,
+                        r1=leg.r1,
+                        r3=leg.r3,
+                        r5=leg.r5,
+                        bar_index=leg.entry_bar_index,
                         exit_time=bar.ts,
                         exit_price=float(row["close"]),
                         result=result,
                         pnl_r=pnl_r,
                     )
                 )
-                open_pos = None
+            else:
+                still_open.append(leg)
+        open_legs = still_open
 
         if cfg.HUNTING_USE_DIRECTION_COOLDOWN:
             _unlock_on_opposite_signal(cd, bar)
 
-        eff_long = bar.long_sig and _can_enter(cd, "LONG")
-        eff_short = bar.short_sig and _can_enter(cd, "SHORT")
+        if bar.long_sig and (not cfg.HUNTING_USE_DIRECTION_COOLDOWN or _can_enter(cd, "LONG")):
+            _try_open_leg(bar, "long", bar.sl_long, bar.stars_l, open_legs, entry_signals)
+        if bar.short_sig and (not cfg.HUNTING_USE_DIRECTION_COOLDOWN or _can_enter(cd, "SHORT")):
+            _try_open_leg(bar, "short", bar.sl_short, bar.stars_s, open_legs, entry_signals)
 
-        if open_pos is None:
-            if eff_long:
-                sl = bar.sl_long
-                side = "long"
-                plan = build_hunting_trade_plan(side, bar.close, sl)
-                if plan:
-                    entry_signals.append(
-                        Signal(bar_index=bar.bar_index, side=side, entry=bar.close, plan=plan, stars=bar.stars_l)
-                    )
-                    open_pos = _open_position("LONG", bar.ts, bar.close, sl, bar.bar_index)
-                    entry_bar_index = bar.bar_index
-            elif eff_short:
-                sl = bar.sl_short
-                side = "short"
-                plan = build_hunting_trade_plan(side, bar.close, sl)
-                if plan:
-                    entry_signals.append(
-                        Signal(bar_index=bar.bar_index, side=side, entry=bar.close, plan=plan, stars=bar.stars_s)
-                    )
-                    open_pos = _open_position("SHORT", bar.ts, bar.close, sl, bar.bar_index)
-                    entry_bar_index = bar.bar_index
-
-    if open_pos is not None:
+    for leg in open_legs:
         trades.append(
             SimTrade(
-                direction=open_pos.direction,
-                entry_time=open_pos.entry_time,
-                entry_price=open_pos.entry_price,
-                sl=open_pos.initial_sl,
-                r1=open_pos.r1,
-                r3=open_pos.r3,
-                r5=open_pos.r5,
-                bar_index=entry_bar_index,
+                direction=leg.direction,
+                entry_time=leg.entry_time,
+                entry_price=leg.entry_price,
+                sl=leg.initial_sl,
+                r1=leg.r1,
+                r3=leg.r3,
+                r5=leg.r5,
+                bar_index=leg.entry_bar_index,
                 result="OPEN",
-                pnl_r=open_pos.realized_r,
+                pnl_r=leg.realized_r,
             )
         )
     return trades, entry_signals
@@ -524,7 +543,7 @@ def scan_raw_signals(df: pd.DataFrame) -> list[Signal]:
 
 
 def scan_signals(df: pd.DataFrame) -> list[Signal]:
-    """有效進場訊號（simulate_trades · 同時僅一倉）。"""
+    """實際建倉訊號（simulate_trades · 分倉 · 受倉數/保證金上限）。"""
     results = compute_bar_results(df)
     _, entry_signals = simulate_trades(df, results)
     return entry_signals
