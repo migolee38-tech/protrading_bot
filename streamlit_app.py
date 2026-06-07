@@ -33,6 +33,7 @@ from core.backtest_report import run_backtest
 from core.lightweight_tv import (
     build_lightweight_chart_html,
     build_live_price_rest_html,
+    df_to_ema_line,
     df_to_tv_series,
     markers_for_open_orders,
     markers_for_strategies,
@@ -734,6 +735,7 @@ def _render_chart_block(
             icon="⚠️",
         )
     candles, volumes = df_to_tv_series(raw)
+    ema150 = df_to_ema_line(raw)
     markers: list[dict] = []
     # 顯示所有已啟用策略的觸發箭頭（依目前圖表週期計算），不再只畫單一高亮策略，
     # 避免高亮到當下無訊號的策略（如 EMA）時整張圖看不到任何標記。
@@ -757,6 +759,7 @@ def _render_chart_block(
         candles=candles,
         volumes=volumes,
         markers=markers,
+        ema150=ema150,
         title=title,
         symbol=sym,
         chart_interval=chart_tf,

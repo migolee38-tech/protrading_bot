@@ -14,6 +14,7 @@ from typing import Any
 
 import pandas as pd
 
+import config as cfg
 from core.market_data import (
     FUTURES_BASE,
     SPOT_BASE,
@@ -96,6 +97,22 @@ def df_to_tv_series(df: pd.DataFrame) -> tuple[list[dict[str, Any]], list[dict[s
         col = "#26a69a" if c >= o else "#ef5350"
         volumes.append({"time": t, "value": float(row["volume"]), "color": col})
     return candles, volumes
+
+
+def df_to_ema_line(
+    df: pd.DataFrame,
+    length: int = cfg.HUNTING_HTF_EMA_LEN,
+) -> list[dict[str, Any]]:
+    """EMA overlay（與 Hunting Funding 相同 ewm 算法）；略過暖機期 NaN。"""
+    if df.empty or "close" not in df.columns or "datetime" not in df.columns:
+        return []
+    ema = df["close"].ewm(span=length, adjust=False).mean()
+    out: list[dict[str, Any]] = []
+    for (_, row), val in zip(df.iterrows(), ema, strict=False):
+        if pd.isna(val):
+            continue
+        out.append({"time": _time_sec(row["datetime"]), "value": float(val)})
+    return out
 
 
 def markers_for_strategies(prep_for_tf: pd.DataFrame, strategy_ids: list[str]) -> list[dict[str, Any]]:
@@ -209,6 +226,7 @@ def build_lightweight_chart_html(
     mark_price_note: str | None = None,
     agg_trade_ws_url: str = "",
     show_price_header: bool = True,
+    ema150: list[dict[str, Any]] | None = None,
 ) -> str:
     """產生可給 streamlit.components.v1.html 的完整 HTML 文件。
 
@@ -271,6 +289,8 @@ def build_lightweight_chart_html(
         "restTickerUrls": binance_rest_ticker_urls(sym, market) if use_live else [],
         "restPollMs": 400,
         "barSeconds": _interval_to_seconds(chart_interval),
+        "ema150": ema150 or [],
+        "ema150Len": cfg.HUNTING_HTF_EMA_LEN,
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
     title_esc = html.escape(title)
@@ -324,6 +344,7 @@ def build_lightweight_chart_html(
       <label><input type="checkbox" id="logChk"> 對數軸</label>
       <label><input type="checkbox" id="magChk" checked> 十字準星吸附</label>
       <label><input type="checkbox" id="volChk" checked> 成交量</label>
+      <label><input type="checkbox" id="emaChk" checked> EMA150</label>
     </div>
   </div>
   <div id="chart"></div>
@@ -340,6 +361,7 @@ def build_lightweight_chart_html(
   const logChk = document.getElementById('logChk');
   const magChk = document.getElementById('magChk');
   const volChk = document.getElementById('volChk');
+  const emaChk = document.getElementById('emaChk');
 
   // 圖表時間軸固定顯示台灣時區（與 TradingView UTC+8 對齊）
   const CHART_TZ = 'Asia/Taipei';
@@ -479,6 +501,21 @@ def build_lightweight_chart_html(
       title: 'Last',
     }});
   }}
+  let emaSeries = null;
+  if (BOOT.ema150 && BOOT.ema150.length) {{
+    emaSeries = chart.addSeries(LightweightCharts.LineSeries, {{
+      color: '#ff9800',
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      title: 'EMA' + (BOOT.ema150Len || 150),
+    }});
+    emaSeries.setData(BOOT.ema150);
+  }} else if (emaChk) {{
+    emaChk.disabled = true;
+    emaChk.checked = false;
+  }}
+
   if (!BOOT.markPriceWsUrl && !BOOT.combinedFuturesUrl) {{
     markPxEl.style.fontSize = '12px';
     markPxEl.style.fontWeight = '500';
@@ -518,9 +555,13 @@ def build_lightweight_chart_html(
   function applyVolumeVisible() {{
     volumeSeries.applyOptions({{ visible: volChk.checked }});
   }}
+  function applyEmaVisible() {{
+    if (emaSeries) emaSeries.applyOptions({{ visible: emaChk.checked }});
+  }}
   if (logChk) logChk.addEventListener('change', applyLogScale);
   if (magChk) magChk.addEventListener('change', applyMagnet);
   if (volChk) volChk.addEventListener('change', applyVolumeVisible);
+  if (emaChk) emaChk.addEventListener('change', applyEmaVisible);
 
   let lastBarTime = null;
   /** 僅在未完成棒上 agg refinement：open 永遠跟 kline；high/low/close 可跟 agg */
