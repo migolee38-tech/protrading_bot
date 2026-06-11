@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
@@ -33,6 +33,7 @@ class AccountView:
     income: pd.DataFrame
     strategy_stats: pd.DataFrame
     error: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 def _float(val: Any, default: float = 0.0) -> float:
@@ -315,6 +316,48 @@ def _aggregate_trades_by_order(rows: list[dict]) -> pd.DataFrame:
     return out.sort_values("time", ascending=False).reset_index(drop=True)
 
 
+def _collect_symbols(
+    positions: pd.DataFrame,
+    open_orders: pd.DataFrame,
+    income: pd.DataFrame,
+    bot_orders: pd.DataFrame,
+) -> set[str]:
+    symbols: set[str] = set()
+    for df, col in (
+        (positions, "symbol"),
+        (open_orders, "symbol"),
+        (income, "symbol"),
+        (bot_orders, "symbol"),
+    ):
+        if not df.empty and col in df.columns:
+            symbols.update(df[col].astype(str).str.upper().tolist())
+    return {s for s in symbols if s and s != "nan"}
+
+
+def _fetch_all_open_orders(client: Any, symbols: set[str]) -> list[dict]:
+    """
+    查詢全部掛單。
+    binance-futures-connector 的 get_open_orders(symbol) 為單筆查詢；
+    get_orders() 對應 GET /fapi/v1/openOrders，可不帶 symbol。
+    """
+    try:
+        rows = client.get_orders()
+        if isinstance(rows, list):
+            return rows
+    except Exception:
+        pass
+
+    rows: list[dict] = []
+    for sym in sorted(symbols):
+        try:
+            part = client.get_orders(symbol=sym)
+            if isinstance(part, list):
+                rows.extend(part)
+        except Exception:
+            continue
+    return rows
+
+
 def _income_df(rows: list[dict]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
@@ -365,72 +408,86 @@ def fetch_futures_account(
         empty.error = credentials_hint(mode)
         return empty
 
+    warnings: list[str] = []
     try:
         settings = FuturesSettings.from_exec_mode(mode)
         client = create_client(settings)
-        bot_orders = bot_orders_for_mode(mode)
+    except Exception as e:
+        empty.error = _format_api_error(e)
+        return empty
 
+    bot_orders = bot_orders_for_mode(mode)
+
+    try:
         acct = client.account()
         assets = acct.get("assets", [])
         usdt = next((a for a in assets if a.get("asset") == "USDT"), {})
         wallet = _float(usdt.get("walletBalance"))
         available = _float(usdt.get("availableBalance"))
-
-        positions = _positions_df(client.get_position_risk())
-        open_orders = _open_orders_df(client.get_open_orders())
-        open_orders = attach_leverage_to_orders(open_orders, positions, bot_orders)
-
-        income = _income_df(client.get_income_history(limit=income_limit))
-        income_sum = summarize_income(income)
-
-        symbols: set[str] = set()
-        if not positions.empty:
-            symbols.update(positions["symbol"].astype(str).tolist())
-        if not open_orders.empty:
-            symbols.update(open_orders["symbol"].astype(str).tolist())
-        if not income.empty and "symbol" in income.columns:
-            symbols.update(income["symbol"].astype(str).tolist())
-        if not bot_orders.empty and "symbol" in bot_orders.columns:
-            symbols.update(bot_orders["symbol"].astype(str).str.upper().tolist())
-
-        trade_rows: list[dict] = []
-        for sym in sorted(s for s in symbols if s):
-            try:
-                for r in client.get_account_trades(symbol=sym, limit=trade_limit_per_symbol):
-                    row = dict(r)
-                    row["symbol"] = sym
-                    trade_rows.append(row)
-            except Exception:
-                continue
-        trades = _aggregate_trades_by_order(trade_rows)
-        trades = attach_leverage_and_strategy_to_trades(trades, positions, bot_orders)
-
-        win_rate, pf = compute_trade_stats(trades)
-        strategy_stats = strategy_performance_table(trades)
-        unrealized = float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
-
-        return AccountView(
-            mode=mode.value,
-            wallet_balance=wallet,
-            available_balance=available,
-            unrealized_pnl=unrealized,
-            weighted_leverage=weighted_position_leverage(positions),
-            win_rate=win_rate,
-            profit_factor=pf,
-            realized_pnl=income_sum["realized_pnl"],
-            commission=income_sum["commission"],
-            funding=income_sum["funding"],
-            position_count=len(positions),
-            open_order_count=len(open_orders),
-            positions=positions,
-            open_orders=open_orders,
-            trades=trades,
-            income=income,
-            strategy_stats=strategy_stats,
-        )
     except Exception as e:
-        empty.error = _format_api_error(e)
+        empty.error = f"帳戶讀取失敗: {_format_api_error(e)}"
         return empty
+
+    try:
+        positions = _positions_df(client.get_position_risk())
+    except Exception as e:
+        warnings.append(f"持倉讀取失敗: {_format_api_error(e)}")
+        positions = pd.DataFrame()
+
+    symbols = _collect_symbols(positions, pd.DataFrame(), pd.DataFrame(), bot_orders)
+
+    try:
+        open_orders = _open_orders_df(_fetch_all_open_orders(client, symbols))
+        open_orders = attach_leverage_to_orders(open_orders, positions, bot_orders)
+    except Exception as e:
+        warnings.append(f"掛單讀取失敗: {_format_api_error(e)}")
+        open_orders = pd.DataFrame()
+
+    try:
+        income = _income_df(client.get_income_history(limit=income_limit))
+    except Exception as e:
+        warnings.append(f"損益紀錄讀取失敗: {_format_api_error(e)}")
+        income = pd.DataFrame()
+    income_sum = summarize_income(income)
+
+    symbols = _collect_symbols(positions, open_orders, income, bot_orders)
+
+    trade_rows: list[dict] = []
+    for sym in sorted(symbols):
+        try:
+            for r in client.get_account_trades(symbol=sym, limit=trade_limit_per_symbol):
+                row = dict(r)
+                row["symbol"] = sym
+                trade_rows.append(row)
+        except Exception:
+            continue
+    trades = _aggregate_trades_by_order(trade_rows)
+    trades = attach_leverage_and_strategy_to_trades(trades, positions, bot_orders)
+
+    win_rate, pf = compute_trade_stats(trades)
+    strategy_stats = strategy_performance_table(trades)
+    unrealized = float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
+
+    return AccountView(
+        mode=mode.value,
+        wallet_balance=wallet,
+        available_balance=available,
+        unrealized_pnl=unrealized,
+        weighted_leverage=weighted_position_leverage(positions),
+        win_rate=win_rate,
+        profit_factor=pf,
+        realized_pnl=income_sum["realized_pnl"],
+        commission=income_sum["commission"],
+        funding=income_sum["funding"],
+        position_count=len(positions),
+        open_order_count=len(open_orders),
+        positions=positions,
+        open_orders=open_orders,
+        trades=trades,
+        income=income,
+        strategy_stats=strategy_stats,
+        warnings=warnings,
+    )
 
 
 def fetch_paper_account(*, limit: int = 500) -> AccountView:

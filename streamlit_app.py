@@ -1002,6 +1002,7 @@ def _account_view_to_dict(view: AccountView) -> dict:
         "trades": view.trades,
         "income": view.income,
         "strategy_stats": view.strategy_stats,
+        "warnings": view.warnings,
     }
 
 
@@ -1029,6 +1030,7 @@ def _load_account_view(mode: ExecMode) -> AccountView:
         income=data["income"],
         strategy_stats=data["strategy_stats"],
         error=data["error"],
+        warnings=data.get("warnings") or [],
     )
 
 
@@ -1060,6 +1062,9 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
     if view.error:
         st.error(view.error)
         return
+
+    for warn in view.warnings:
+        st.warning(warn)
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("錢包餘額 (USDT)", f"{view.wallet_balance:,.2f}")
