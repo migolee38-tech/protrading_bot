@@ -12,13 +12,17 @@ import logging
 import argparse
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 import requests
+from dotenv import load_dotenv
 
 from core.universe import top_usdt_pairs_by_volume
+
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 # ── 選用套件（telegram / binance order） ──────────────────────────
 try:
@@ -775,6 +779,39 @@ def _get_lot_step(client: UMFutures, symbol: str) -> tuple[float, int]:
     return step, precision
 
 
+def make_futures_client(cfg: Config) -> "UMFutures":
+    """建立 USDT-M 永續客戶端（testnet 或主網）。"""
+    base_url = "https://testnet.binancefuture.com" if cfg.testnet else None
+    return UMFutures(key=cfg.api_key, secret=cfg.api_secret, base_url=base_url)
+
+
+def verify_binance_connection(cfg: Config) -> bool:
+    """啟動前驗證 API 金鑰與模擬倉連線。"""
+    from core.binance_credentials import ExecMode, credentials_hint
+
+    if not cfg.api_key or not cfg.api_secret:
+        mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
+        log.error(f"缺少 API 金鑰。{credentials_hint(mode)}")
+        return False
+    if not HAS_BINANCE_CLIENT:
+        log.error("請安裝 binance-futures-connector: pip install binance-futures-connector")
+        return False
+    net = "Testnet 模擬倉" if cfg.testnet else "主網實盤"
+    try:
+        client = make_futures_client(cfg)
+        acct = client.account()
+        assets = acct.get("assets", [])
+        usdt = next((a for a in assets if a.get("asset") == "USDT"), None)
+        balance = float(usdt["walletBalance"]) if usdt else 0.0
+        log.info(f"✅ 已連線 Binance 永續 {net}  可用 USDT: {balance:.2f}")
+        return True
+    except Exception as e:
+        log.error(f"❌ Binance {net} 連線失敗: {e}")
+        if cfg.testnet:
+            log.error("請確認金鑰來自 https://testnet.binancefuture.com（非主網 api.binance.com）")
+        return False
+
+
 def resolve_leverage(client: UMFutures, symbol: str, cfg: Config) -> int:
     """0 表示使用該交易對允許的最大槓桿。"""
     if cfg.leverage > 0:
@@ -795,10 +832,7 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
         log.error("請安裝 binance-futures-connector: pip install binance-futures-connector")
         return
 
-    client = UMFutures(
-        key=cfg.api_key, secret=cfg.api_secret,
-        base_url="https://testnet.binancefuture.com" if cfg.testnet else None
-    )
+    client = make_futures_client(cfg)
 
     side = "BUY" if direction == "LONG" else "SELL"
     exit_side = "SELL" if direction == "LONG" else "BUY"
@@ -881,9 +915,18 @@ def scan_symbol(cfg: Config, symbol: str, engine: HuntingEngine) -> tuple[pd.Dat
 # ═══════════════════════════════════════════════════════════════════
 
 def live_scan(cfg: Config):
+    if cfg.auto_trade and not verify_binance_connection(cfg):
+        raise SystemExit(1)
+
     engine = HuntingEngine(cfg)
     symbols = resolve_symbols(cfg)
-    log.info(f"🚀 即時掃描啟動  Top {cfg.top_n} 成交量 ({len(symbols)} 個)  {cfg.interval}")
+    trade_mode = "自動下單·Testnet" if cfg.auto_trade and cfg.testnet else (
+        "自動下單·主網" if cfg.auto_trade else "僅掃描訊號"
+    )
+    log.info(
+        f"🚀 即時掃描啟動  Top {cfg.top_n} 成交量 ({len(symbols)} 個)  "
+        f"{cfg.interval}  [{trade_mode}]"
+    )
 
     while True:
         try:
@@ -1037,15 +1080,23 @@ def parse_args():
                    help="已用保證金超過總資金此比例則拒絕新單")
     p.add_argument("--leverage",      type=int,   default=0,
                    help="槓桿倍數，0=使用交易對最大槓桿")
-    p.add_argument("--api-key",    default=os.getenv("BINANCE_API_KEY",""))
-    p.add_argument("--api-secret", default=os.getenv("BINANCE_API_SECRET",""))
+    p.add_argument("--api-key",    default="")
+    p.add_argument("--api-secret", default="")
     p.add_argument("--tg-token",   default=os.getenv("TG_TOKEN",""))
     p.add_argument("--tg-chat-id", default=os.getenv("TG_CHAT_ID",""))
+    p.add_argument("--verify-only", action="store_true",
+                   help="僅測試 Binance API 連線後結束")
     return p.parse_args()
 
 
 def main():
+    from core.binance_credentials import ExecMode, load_credentials
+
     args = parse_args()
+    cred_mode = ExecMode.TESTNET if args.testnet else ExecMode.LIVE
+    env_key, env_secret = load_credentials(cred_mode)
+    api_key = args.api_key or env_key
+    api_secret = args.api_secret or env_secret
     cfg  = Config(
         symbol           = args.symbol,
         top_n            = args.top_n,
@@ -1067,11 +1118,15 @@ def main():
         max_concurrent_positions = args.max_concurrent_positions,
         max_margin_usage_pct     = args.max_margin_usage_pct,
         leverage         = args.leverage,
-        api_key          = args.api_key,
-        api_secret       = args.api_secret,
+        api_key          = api_key,
+        api_secret       = api_secret,
         tg_token         = args.tg_token,
         tg_chat_id       = args.tg_chat_id,
     )
+
+    if args.verify_only:
+        ok = verify_binance_connection(cfg)
+        raise SystemExit(0 if ok else 1)
 
     if args.mode == "live":
         live_scan(cfg)

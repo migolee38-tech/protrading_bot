@@ -7,3 +7,6 @@ state.json
 data/cache/
 data/reports/
 data/paper_orders.json
+logs/
+hunting_funding.log
+data/live_trader_state.json

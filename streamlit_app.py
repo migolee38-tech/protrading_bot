@@ -39,12 +39,13 @@ from core.lightweight_tv import (
     markers_for_strategies,
 )
 from core.market_data import MarketType, fetch_klines, fetch_symbol_last_price, pop_source_note
+from core.binance_credentials import credentials_configured, credentials_hint, mode_label
 from core.order_executor import (
     OrderMode,
     OrderRequest,
     list_paper_orders,
-    place_paper_order,
-    scan_and_paper_trade,
+    place_order,
+    scan_and_execute,
 )
 from core.strategy_registry import STRATEGIES, scan_signals_for, with_symbol
 from strategies.hunting_funding import load_oi_status
@@ -77,7 +78,8 @@ def _init_state() -> None:
         "selected_symbol": "BTCUSDT",
         "selected_pair": "BTC/USDT",
         "market": "futures",
-        "paper_enabled": True,
+        "order_enabled": True,
+        "order_live_confirmed": False,
         "chart_highlight_id": "ema",
         "active_strategy_ids": list(STRATEGIES.keys()),
         "sidebar_top_n": 100,
@@ -506,10 +508,10 @@ def _order_right_panel(
     else:
         st.metric("最新價", "—")
 
-    st.session_state.paper_enabled = st.toggle(
-        "啟用模擬開單",
-        value=st.session_state.paper_enabled,
-        key="order_paper_toggle",
+    st.session_state.order_enabled = st.toggle(
+        "啟用自動下單",
+        value=st.session_state.get("order_enabled", st.session_state.get("paper_enabled", True)),
+        key="order_enabled_toggle",
     )
 
     order_style = st.radio(
@@ -519,12 +521,25 @@ def _order_right_panel(
         key="order_style",
     )
     exec_mode = st.radio(
-        "帳戶",
-        ["paper", "live"],
-        format_func=lambda x: "模擬" if x == "paper" else "實盤",
+        "下單模式",
+        ["paper", "testnet", "live"],
+        format_func=lambda x: mode_label(x),
         horizontal=True,
         key="order_exec_mode",
     )
+
+    if exec_mode == "paper":
+        st.caption("本地模擬：寫入 data/paper_orders.json，不需 API。")
+    elif exec_mode == "testnet":
+        if credentials_configured("testnet"):
+            st.caption("✅ Testnet 金鑰已設定（BINANCE_TESTNET_API_KEY）")
+        else:
+            st.warning(credentials_hint("testnet"))
+    else:
+        if credentials_configured("live"):
+            st.caption("⚠️ 主網實盤金鑰已設定（BINANCE_API_KEY）")
+        else:
+            st.warning(credentials_hint("live"))
 
     sid_pool = strategy_ids or [chart_highlight]
     sid = st.selectbox(
@@ -534,20 +549,48 @@ def _order_right_panel(
         key="order_form_sid",
     )
 
+    live_confirmed = False
+    if exec_mode == "live":
+        live_confirmed = st.checkbox(
+            "我了解主網實盤風險，確認使用真實資金下單",
+            value=st.session_state.get("order_live_confirmed", False),
+            key="order_live_confirm",
+        )
+        st.session_state.order_live_confirmed = live_confirmed
+
     if order_style == "自動掃描":
         scan_n = st.slider("掃描榜單前 N", 5, 30, 10, key="order_scan_n")
-        if st.button("掃描 → 模擬下單", type="primary", key="order_scan_btn"):
-            if not st.session_state.paper_enabled:
-                st.warning("請先開啟「啟用模擬開單」")
-            elif exec_mode != "paper":
-                st.warning("自動掃描目前僅支援模擬盤")
+        scan_labels = {"paper": "本地模擬", "testnet": "Testnet", "live": "主網實盤"}
+        if st.button(
+            f"掃描 → {scan_labels.get(exec_mode, exec_mode)}下單",
+            type="primary",
+            key="order_scan_btn",
+        ):
+            if not st.session_state.order_enabled:
+                st.warning("請先開啟「啟用自動下單」")
+            elif exec_mode == "live" and not live_confirmed:
+                st.warning("主網實盤請先勾選風險確認")
+            elif exec_mode in ("testnet", "live") and market != "futures":
+                st.warning("Testnet / 主網實盤目前僅支援永續市場")
+            elif exec_mode in ("testnet", "live") and not credentials_configured(exec_mode):
+                st.warning(credentials_hint(exec_mode))
             elif not strategy_ids:
                 st.warning("請在頂部至少選一個策略")
             else:
                 syms = universe_df["symbol"].head(scan_n).tolist()
                 with st.spinner("掃描中…"):
-                    placed = scan_and_paper_trade(syms, strategy_ids, market=market)
-                st.success(f"本輪模擬成交 {len(placed)} 筆")
+                    try:
+                        placed = scan_and_execute(
+                            syms,
+                            strategy_ids,
+                            mode=exec_mode,
+                            market=market,
+                            leverage=int(st.session_state.get("order_leverage", 10)),
+                        )
+                    except Exception as exc:
+                        st.error(str(exc))
+                        placed = []
+                st.success(f"本輪成交 {len(placed)} 筆（{mode_label(exec_mode)}）")
                 st.rerun()
     else:
         hints = _strategy_order_hints(sym, sid, market)
@@ -594,7 +637,7 @@ def _order_right_panel(
             key="order_price_input",
         )
         if order_type == "market":
-            st.caption("市價單以最新價成交（模擬記錄用目前最新價）")
+            st.caption("市價單以最新價成交（paper 為本地記錄價）")
             fill_px = fetch_symbol_last_price(sym, market)
             if fill_px <= 0:
                 fill_px = last_px
@@ -645,10 +688,14 @@ def _order_right_panel(
         st.caption(f"名義價值 ≈ {notional:,.4f} USDT（價格 × 數量 × 槓桿）")
 
         if st.button("開倉", type="primary", key="order_submit_btn"):
-            if not st.session_state.paper_enabled:
-                st.warning("請先開啟「啟用模擬開單」")
-            elif exec_mode != "paper":
-                st.warning("表單開倉目前僅支援模擬盤")
+            if not st.session_state.order_enabled:
+                st.warning("請先開啟「啟用自動下單」")
+            elif exec_mode == "live" and not live_confirmed:
+                st.warning("主網實盤請先勾選風險確認")
+            elif exec_mode in ("testnet", "live") and market != "futures":
+                st.warning("Testnet / 主網實盤目前僅支援永續市場")
+            elif exec_mode in ("testnet", "live") and not credentials_configured(exec_mode):
+                st.warning(credentials_hint(exec_mode))
             elif price <= 0 or qty <= 0:
                 st.warning("請填寫有效價格與數量")
             elif stop_px <= 0:
@@ -663,21 +710,20 @@ def _order_right_panel(
                     entry=entry,
                     stop=stop_px,
                     quantity=qty,
-                    mode=OrderMode.PAPER,
+                    mode=OrderMode(exec_mode),
                     order_type=order_type,
                     price=price if order_type == "limit" else entry,
                     leverage=int(leverage),
                     take_profit=tp_px if tp_px > 0 else None,
                     margin_type=margin_val,
                 )
-                place_paper_order(req)
-                st.success("已寫入模擬單")
-                st.rerun()
-
-    if exec_mode == "live":
-        st.warning("實盤需 API；建議先用 Testnet。")
-        if st.checkbox("我了解風險", key="order_live_confirm"):
-            st.caption("實盤按鈕尚未啟用，請完成 testnet 後再接。")
+                try:
+                    place_order(req, market=market)
+                except Exception as exc:
+                    st.error(str(exc))
+                else:
+                    st.success(f"已下單（{mode_label(exec_mode)}）")
+                    st.rerun()
 
     st.markdown("---")
     st.markdown("##### 本幣持倉 / 紀錄")
@@ -905,8 +951,8 @@ def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int)
 
 def _tab_paper_fills() -> None:
     """5/20 初版：模擬成交紀錄（原始 JSON 欄位直接顯示）。"""
-    st.subheader("模擬成交紀錄")
-    st.caption("資料來源：data/paper_orders.json · 下單請至「主工作站」右欄")
+    st.subheader("成交紀錄")
+    st.caption("資料來源：data/paper_orders.json（含 paper / testnet / live）· 下單請至「主工作站」右欄")
 
     orders = list_paper_orders(limit=200)
     if orders.empty:

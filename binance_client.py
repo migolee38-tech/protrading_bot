@@ -15,30 +15,14 @@ _ENV_PATH = _PROJECT_ROOT / ".env"
 
 
 def _load_credentials() -> tuple[str, str]:
-    """從 Streamlit Secrets、.env 或環境變數讀取 API 密鑰。"""
+    """主網現貨 API 密鑰（live）。"""
+    from core.binance_credentials import ExecMode, credentials_hint, load_credentials
+
     load_dotenv(_ENV_PATH)
-
-    api_key = os.getenv("BINANCE_API_KEY") or os.getenv("API_KEY")
-    api_secret = os.getenv("BINANCE_API_SECRET") or os.getenv("API_SECRET")
-
+    api_key, api_secret = load_credentials(ExecMode.LIVE)
     if not api_key or not api_secret:
-        try:
-            import streamlit as st
-
-            if hasattr(st, "secrets"):
-                api_key = api_key or st.secrets.get("BINANCE_API_KEY") or st.secrets.get("API_KEY")
-                api_secret = (
-                    api_secret or st.secrets.get("BINANCE_API_SECRET") or st.secrets.get("API_SECRET")
-                )
-        except Exception:
-            pass
-
-    if not api_key or not api_secret:
-        raise ValueError(
-            "缺少 API 密鑰。請在 .env 或 Streamlit Cloud Secrets 設定 "
-            "BINANCE_API_KEY / BINANCE_API_SECRET（或 API_KEY / API_SECRET）。"
-        )
-    return api_key.strip(), api_secret.strip()
+        raise ValueError(f"缺少 API 密鑰。{credentials_hint(ExecMode.LIVE)}")
+    return api_key, api_secret
 
 
 def create_client() -> Spot:
