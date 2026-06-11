@@ -20,6 +20,7 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+from core.order_tags import build_client_order_id
 from core.universe import top_usdt_pairs_by_volume
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
@@ -864,7 +865,14 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
         return
 
     try:
-        client.new_order(symbol=symbol, side=side, type="MARKET", quantity=qty)
+        entry_cid = build_client_order_id("hunting_funding", symbol)
+        client.new_order(
+            symbol=symbol,
+            side=side,
+            type="MARKET",
+            quantity=qty,
+            newClientOrderId=entry_cid,
+        )
         log.info(f"已下單 {side} {qty} {symbol} @ market")
 
         # 初始止損（全倉）

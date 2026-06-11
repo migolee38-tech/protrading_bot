@@ -150,8 +150,14 @@ def place_bracket_order(
     stop: float,
     take_profit: float | None,
     leverage: int,
+    strategy_id: str | None = None,
+    client_order_id: str | None = None,
 ) -> dict:
     """市價進場 + 止損 + 可選止盈（reduceOnly）。回傳交易所市價單結果。"""
+    from core.order_tags import build_client_order_id
+
+    if not client_order_id and strategy_id:
+        client_order_id = build_client_order_id(strategy_id, symbol)
     order_side = "BUY" if side == "long" else "SELL"
     exit_side = "SELL" if side == "long" else "BUY"
 
@@ -165,7 +171,10 @@ def place_bracket_order(
     if qty <= 0:
         raise ValueError(f"{symbol} 計算數量為 0")
 
-    entry_result = client.new_order(symbol=symbol, side=order_side, type="MARKET", quantity=qty)
+    entry_kwargs: dict = {"symbol": symbol, "side": order_side, "type": "MARKET", "quantity": qty}
+    if client_order_id:
+        entry_kwargs["newClientOrderId"] = client_order_id
+    entry_result = client.new_order(**entry_kwargs)
     log.info(f"已下單 {order_side} {qty} {symbol} @ market")
 
     client.new_order(

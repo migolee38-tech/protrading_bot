@@ -11,6 +11,7 @@ import pandas as pd
 from core.backtest_pnl import profit_factor_from_pnls
 from core.binance_credentials import ExecMode, credentials_configured, credentials_hint
 from core.binance_futures import FuturesSettings, create_client
+from core.order_tags import strategy_name_from_client_order_id
 
 
 @dataclass
@@ -153,10 +154,23 @@ def attach_leverage_and_strategy_to_trades(
         sym = str(row.get("symbol", "")).upper()
         lev = order_lev.get(oid) or sym_lev.get(sym)
         leverages.append(lev)
-        strategies.append(order_strategy.get(oid, ""))
+        cid = str(row.get("client_order_id", "") or "")
+        name = strategy_name_from_client_order_id(cid)
+        if not name:
+            name = order_strategy.get(oid, "")
+        strategies.append(name)
 
     out["leverage"] = leverages
     out["strategy_name"] = strategies
+    # 平倉成交通常無 clientOrderId：沿用同 symbol 已辨識的策略
+    sym_strategy: dict[str, str] = {}
+    for name, sym in zip(out["strategy_name"], out["symbol"].astype(str).str.upper()):
+        if name:
+            sym_strategy[sym] = name
+    out["strategy_name"] = [
+        (n or sym_strategy.get(str(s).upper(), ""))
+        for n, s in zip(out["strategy_name"], out["symbol"])
+    ]
     if "realized_pnl" in out.columns:
         out["is_win"] = out["realized_pnl"].apply(lambda x: x > 0 if _float(x) != 0 else None)
     return out
@@ -274,6 +288,7 @@ def _open_orders_df(rows: list[dict]) -> pd.DataFrame:
                 "reduce_only": r.get("reduceOnly", False),
                 "status": r.get("status", ""),
                 "order_id": r.get("orderId", ""),
+                "client_order_id": r.get("clientOrderId", ""),
                 "time": _ms_to_iso(r.get("time")),
             }
         )
@@ -309,6 +324,7 @@ def _aggregate_trades_by_order(rows: list[dict]) -> pd.DataFrame:
                 "commission": commission,
                 "commission_asset": first.get("commissionAsset", ""),
                 "order_id": order_id,
+                "client_order_id": first.get("clientOrderId", ""),
                 "trade_count": len(grp),
             }
         )

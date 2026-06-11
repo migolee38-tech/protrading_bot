@@ -20,6 +20,7 @@ from core.binance_futures import (
     place_bracket_order,
     resolve_leverage,
 )
+from core.order_tags import build_client_order_id
 from core.market_data import MarketType, fetch_klines
 from core.strategy_registry import get_strategy, scan_signals_for, with_symbol
 
@@ -136,6 +137,7 @@ def place_futures_order(req: OrderRequest) -> dict:
         )
 
     sym = req.symbol.replace("/", "").upper()
+    client_order_id = build_client_order_id(req.strategy_id, sym)
     result = place_bracket_order(
         client,
         symbol=sym,
@@ -144,6 +146,8 @@ def place_futures_order(req: OrderRequest) -> dict:
         stop=req.stop,
         take_profit=req.take_profit,
         leverage=lev,
+        strategy_id=req.strategy_id,
+        client_order_id=client_order_id,
     )
 
     row = req.to_dict()
@@ -151,6 +155,7 @@ def place_futures_order(req: OrderRequest) -> dict:
     row["leverage"] = lev
     row["status"] = "filled_testnet" if req.mode == OrderMode.TESTNET else "filled_live"
     row["exchange_order_id"] = result.get("orderId")
+    row["client_order_id"] = result.get("clientOrderId") or client_order_id
     return _append_order(row)
 
 
