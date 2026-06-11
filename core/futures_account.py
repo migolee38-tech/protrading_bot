@@ -1,0 +1,579 @@
+"""Binance USDT-M 永續帳戶與本地模擬帳戶：持倉、委託、成交、績效。"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any
+
+import pandas as pd
+
+from core.backtest_pnl import profit_factor_from_pnls
+from core.binance_credentials import ExecMode, credentials_configured, credentials_hint
+from core.binance_futures import FuturesSettings, create_client
+
+
+@dataclass
+class AccountView:
+    mode: str
+    wallet_balance: float
+    available_balance: float
+    unrealized_pnl: float
+    weighted_leverage: float | None
+    win_rate: float | None
+    profit_factor: float | None
+    realized_pnl: float
+    commission: float
+    funding: float
+    position_count: int
+    open_order_count: int
+    positions: pd.DataFrame
+    open_orders: pd.DataFrame
+    trades: pd.DataFrame
+    income: pd.DataFrame
+    strategy_stats: pd.DataFrame
+    error: str | None = None
+
+
+def _float(val: Any, default: float = 0.0) -> float:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ms_to_iso(ms: Any) -> str:
+    if ms is None:
+        return ""
+    try:
+        ts = int(ms)
+        return pd.to_datetime(ts, unit="ms", utc=True).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (TypeError, ValueError):
+        return str(ms)
+
+
+def _format_api_error(exc: Exception) -> str:
+    code = getattr(exc, "error_code", None)
+    msg = getattr(exc, "error_message", None) or str(exc)
+    if code is not None:
+        return f"Binance API {code}: {msg}"
+    return msg or type(exc).__name__
+
+
+def _strategy_name(strategy_id: str) -> str:
+    from core.strategy_registry import STRATEGIES
+
+    return STRATEGIES[strategy_id].name if strategy_id in STRATEGIES else str(strategy_id)
+
+
+def bot_orders_for_mode(mode: ExecMode | str, limit: int = 500) -> pd.DataFrame:
+    from core.order_executor import list_paper_orders
+
+    orders = list_paper_orders(limit=limit)
+    if orders.empty or "mode" not in orders.columns:
+        return pd.DataFrame()
+    mode_val = mode.value if isinstance(mode, ExecMode) else str(mode)
+    out = orders[orders["mode"].astype(str) == mode_val].copy()
+    if out.empty:
+        return out
+    if "strategy_id" in out.columns:
+        out["strategy_name"] = out["strategy_id"].map(_strategy_name)
+    if "leverage" in out.columns:
+        out["leverage"] = pd.to_numeric(out["leverage"], errors="coerce")
+    return out.sort_values("created_at", ascending=False).reset_index(drop=True)
+
+
+def weighted_position_leverage(positions: pd.DataFrame) -> float | None:
+    if positions.empty or "leverage" not in positions.columns:
+        return None
+    if "size" in positions.columns and "mark_price" in positions.columns:
+        notional = positions["size"].astype(float) * positions["mark_price"].astype(float)
+        total = notional.sum()
+        if total > 0:
+            return float((notional * positions["leverage"].astype(float)).sum() / total)
+    lev = positions["leverage"].astype(float)
+    return float(lev.mean()) if len(lev) else None
+
+
+def _leverage_lookup(positions: pd.DataFrame, bot_orders: pd.DataFrame) -> dict[str, float]:
+    lookup: dict[str, float] = {}
+    if not positions.empty and "symbol" in positions.columns and "leverage" in positions.columns:
+        for _, row in positions.iterrows():
+            lookup[str(row["symbol"])] = _float(row["leverage"], 1)
+    if not bot_orders.empty and "symbol" in bot_orders.columns and "leverage" in bot_orders.columns:
+        for _, row in bot_orders.iterrows():
+            sym = str(row["symbol"]).upper()
+            lev = _float(row.get("leverage"), 0)
+            if lev > 0 and sym not in lookup:
+                lookup[sym] = lev
+    return lookup
+
+
+def attach_leverage_to_orders(
+    open_orders: pd.DataFrame,
+    positions: pd.DataFrame,
+    bot_orders: pd.DataFrame,
+) -> pd.DataFrame:
+    if open_orders.empty:
+        return open_orders
+    out = open_orders.copy()
+    lookup = _leverage_lookup(positions, bot_orders)
+    out["leverage"] = out["symbol"].map(lambda s: lookup.get(str(s), None))
+    return out
+
+
+def attach_leverage_and_strategy_to_trades(
+    trades: pd.DataFrame,
+    positions: pd.DataFrame,
+    bot_orders: pd.DataFrame,
+) -> pd.DataFrame:
+    if trades.empty:
+        return trades
+    out = trades.copy()
+    sym_lev = _leverage_lookup(positions, bot_orders)
+
+    order_lev: dict[str, float] = {}
+    order_strategy: dict[str, str] = {}
+    if not bot_orders.empty:
+        for _, row in bot_orders.iterrows():
+            oid = str(row.get("exchange_order_id", "") or "")
+            if oid:
+                lev = _float(row.get("leverage"), 0)
+                if lev > 0:
+                    order_lev[oid] = lev
+                sid = row.get("strategy_name") or row.get("strategy_id", "")
+                if sid:
+                    order_strategy[oid] = str(sid)
+
+    leverages: list[float | None] = []
+    strategies: list[str] = []
+    for _, row in out.iterrows():
+        oid = str(row.get("order_id", "") or "")
+        sym = str(row.get("symbol", "")).upper()
+        lev = order_lev.get(oid) or sym_lev.get(sym)
+        leverages.append(lev)
+        strategies.append(order_strategy.get(oid, ""))
+
+    out["leverage"] = leverages
+    out["strategy_name"] = strategies
+    if "realized_pnl" in out.columns:
+        out["is_win"] = out["realized_pnl"].apply(lambda x: x > 0 if _float(x) != 0 else None)
+    return out
+
+
+def compute_trade_stats(trades: pd.DataFrame) -> tuple[float | None, float | None]:
+    if trades.empty or "realized_pnl" not in trades.columns:
+        return None, None
+    closed = trades[trades["realized_pnl"].astype(float) != 0]
+    if closed.empty:
+        return None, None
+    pnls = closed["realized_pnl"].astype(float).tolist()
+    wins = sum(1 for p in pnls if p > 0)
+    win_rate = wins / len(pnls) if pnls else None
+    pf = profit_factor_from_pnls(pnls)
+    if pf == float("inf"):
+        pf = 9999.0
+    return win_rate, pf
+
+
+def strategy_performance_table(trades: pd.DataFrame) -> pd.DataFrame:
+    if trades.empty:
+        return pd.DataFrame()
+    df = trades.copy()
+    if "strategy_name" not in df.columns:
+        df["strategy_name"] = "未知"
+    df["strategy_name"] = df["strategy_name"].replace("", "未知")
+
+    rows: list[dict[str, Any]] = []
+    for (strategy, symbol, side), grp in df.groupby(
+        ["strategy_name", "symbol", "side"], dropna=False
+    ):
+        closed = grp[grp["realized_pnl"].astype(float) != 0] if "realized_pnl" in grp.columns else pd.DataFrame()
+        pnls = closed["realized_pnl"].astype(float).tolist() if not closed.empty else []
+        wr, pf = compute_trade_stats(closed if not closed.empty else grp)
+        lev_vals = grp["leverage"].dropna() if "leverage" in grp.columns else pd.Series(dtype=float)
+        leverage = float(lev_vals.mean()) if len(lev_vals) else None
+        avg_price = float(grp["avg_price"].mean()) if "avg_price" in grp.columns and len(grp) else None
+        if avg_price is None and "price" in grp.columns:
+            qty = grp["quantity"].astype(float) if "quantity" in grp.columns else pd.Series([1.0] * len(grp))
+            total_qty = qty.sum()
+            avg_price = float((grp["price"].astype(float) * qty).sum() / total_qty) if total_qty > 0 else None
+
+        rows.append(
+            {
+                "strategy_name": strategy,
+                "symbol": symbol,
+                "side": side,
+                "leverage": leverage,
+                "trade_count": len(grp),
+                "win_rate": wr,
+                "profit_factor": pf,
+                "avg_price": avg_price,
+                "realized_pnl": float(closed["realized_pnl"].sum()) if not closed.empty else 0.0,
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    return out.sort_values(["strategy_name", "symbol"]).reset_index(drop=True)
+
+
+def summarize_income(income: pd.DataFrame) -> dict[str, float]:
+    if income.empty or "income_type" not in income.columns:
+        return {"realized_pnl": 0.0, "commission": 0.0, "funding": 0.0, "net": 0.0}
+    realized = income.loc[income["income_type"] == "REALIZED_PNL", "income"].sum()
+    commission = income.loc[income["income_type"] == "COMMISSION", "income"].sum()
+    funding = income.loc[income["income_type"] == "FUNDING_FEE", "income"].sum()
+    return {
+        "realized_pnl": float(realized),
+        "commission": float(commission),
+        "funding": float(funding),
+        "net": float(realized + commission + funding),
+    }
+
+
+def _positions_df(rows: list[dict]) -> pd.DataFrame:
+    records = []
+    for r in rows:
+        amt = _float(r.get("positionAmt"))
+        if amt == 0:
+            continue
+        records.append(
+            {
+                "symbol": r.get("symbol", ""),
+                "side": "long" if amt > 0 else "short",
+                "size": abs(amt),
+                "entry_price": _float(r.get("entryPrice")),
+                "mark_price": _float(r.get("markPrice")),
+                "unrealized_pnl": _float(r.get("unRealizedProfit")),
+                "leverage": int(_float(r.get("leverage"), 1)),
+                "margin_type": r.get("marginType", ""),
+                "liquidation_price": _float(r.get("liquidationPrice")),
+            }
+        )
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records).sort_values("symbol").reset_index(drop=True)
+
+
+def _open_orders_df(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    records = []
+    for r in rows:
+        records.append(
+            {
+                "symbol": r.get("symbol", ""),
+                "type": r.get("type", ""),
+                "side": r.get("side", ""),
+                "price": _float(r.get("price")),
+                "stop_price": _float(r.get("stopPrice")),
+                "quantity": _float(r.get("origQty")),
+                "filled": _float(r.get("executedQty")),
+                "reduce_only": r.get("reduceOnly", False),
+                "status": r.get("status", ""),
+                "order_id": r.get("orderId", ""),
+                "time": _ms_to_iso(r.get("time")),
+            }
+        )
+    return pd.DataFrame(records).sort_values("time", ascending=False).reset_index(drop=True)
+
+
+def _aggregate_trades_by_order(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    grouped: list[dict[str, Any]] = []
+    for order_id, grp in df.groupby("orderId", sort=False):
+        qty = grp["qty"].astype(float)
+        total_qty = qty.sum()
+        avg_price = float((grp["price"].astype(float) * qty).sum() / total_qty) if total_qty > 0 else 0.0
+        realized = float(grp["realizedPnl"].astype(float).sum()) if "realizedPnl" in grp.columns else 0.0
+        commission = float(grp["commission"].astype(float).sum()) if "commission" in grp.columns else 0.0
+        first = grp.iloc[0]
+        side = first.get("side", "")
+        grouped.append(
+            {
+                "time": _ms_to_iso(grp["time"].max()),
+                "symbol": first.get("symbol", ""),
+                "side": side,
+                "direction": "long" if side == "BUY" else "short",
+                "avg_price": avg_price,
+                "quantity": total_qty,
+                "quote_qty": float(grp["quoteQty"].astype(float).sum()) if "quoteQty" in grp.columns else 0.0,
+                "realized_pnl": realized,
+                "commission": commission,
+                "commission_asset": first.get("commissionAsset", ""),
+                "order_id": order_id,
+                "trade_count": len(grp),
+            }
+        )
+    out = pd.DataFrame(grouped)
+    return out.sort_values("time", ascending=False).reset_index(drop=True)
+
+
+def _income_df(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    records = []
+    for r in rows:
+        records.append(
+            {
+                "time": _ms_to_iso(r.get("time")),
+                "symbol": r.get("symbol", ""),
+                "income_type": r.get("incomeType", ""),
+                "income": _float(r.get("income")),
+                "asset": r.get("asset", ""),
+                "info": r.get("info", ""),
+                "trade_id": r.get("tradeId", ""),
+            }
+        )
+    df = pd.DataFrame(records)
+    return df.sort_values("time", ascending=False).reset_index(drop=True)
+
+
+def fetch_futures_account(
+    mode: ExecMode,
+    *,
+    trade_limit_per_symbol: int = 50,
+    income_limit: int = 200,
+) -> AccountView:
+    """從 Binance 永續 API 拉取 testnet / live 帳戶。"""
+    empty = AccountView(
+        mode=mode.value,
+        wallet_balance=0.0,
+        available_balance=0.0,
+        unrealized_pnl=0.0,
+        weighted_leverage=None,
+        win_rate=None,
+        profit_factor=None,
+        realized_pnl=0.0,
+        commission=0.0,
+        funding=0.0,
+        position_count=0,
+        open_order_count=0,
+        positions=pd.DataFrame(),
+        open_orders=pd.DataFrame(),
+        trades=pd.DataFrame(),
+        income=pd.DataFrame(),
+        strategy_stats=pd.DataFrame(),
+    )
+    if not credentials_configured(mode):
+        empty.error = credentials_hint(mode)
+        return empty
+
+    try:
+        settings = FuturesSettings.from_exec_mode(mode)
+        client = create_client(settings)
+        bot_orders = bot_orders_for_mode(mode)
+
+        acct = client.account()
+        assets = acct.get("assets", [])
+        usdt = next((a for a in assets if a.get("asset") == "USDT"), {})
+        wallet = _float(usdt.get("walletBalance"))
+        available = _float(usdt.get("availableBalance"))
+
+        positions = _positions_df(client.get_position_risk())
+        open_orders = _open_orders_df(client.get_open_orders())
+        open_orders = attach_leverage_to_orders(open_orders, positions, bot_orders)
+
+        income = _income_df(client.get_income_history(limit=income_limit))
+        income_sum = summarize_income(income)
+
+        symbols: set[str] = set()
+        if not positions.empty:
+            symbols.update(positions["symbol"].astype(str).tolist())
+        if not open_orders.empty:
+            symbols.update(open_orders["symbol"].astype(str).tolist())
+        if not income.empty and "symbol" in income.columns:
+            symbols.update(income["symbol"].astype(str).tolist())
+        if not bot_orders.empty and "symbol" in bot_orders.columns:
+            symbols.update(bot_orders["symbol"].astype(str).str.upper().tolist())
+
+        trade_rows: list[dict] = []
+        for sym in sorted(s for s in symbols if s):
+            try:
+                for r in client.get_account_trades(symbol=sym, limit=trade_limit_per_symbol):
+                    row = dict(r)
+                    row["symbol"] = sym
+                    trade_rows.append(row)
+            except Exception:
+                continue
+        trades = _aggregate_trades_by_order(trade_rows)
+        trades = attach_leverage_and_strategy_to_trades(trades, positions, bot_orders)
+
+        win_rate, pf = compute_trade_stats(trades)
+        strategy_stats = strategy_performance_table(trades)
+        unrealized = float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
+
+        return AccountView(
+            mode=mode.value,
+            wallet_balance=wallet,
+            available_balance=available,
+            unrealized_pnl=unrealized,
+            weighted_leverage=weighted_position_leverage(positions),
+            win_rate=win_rate,
+            profit_factor=pf,
+            realized_pnl=income_sum["realized_pnl"],
+            commission=income_sum["commission"],
+            funding=income_sum["funding"],
+            position_count=len(positions),
+            open_order_count=len(open_orders),
+            positions=positions,
+            open_orders=open_orders,
+            trades=trades,
+            income=income,
+            strategy_stats=strategy_stats,
+        )
+    except Exception as e:
+        empty.error = _format_api_error(e)
+        return empty
+
+
+def fetch_paper_account(*, limit: int = 500) -> AccountView:
+    """本地模擬帳戶：從 paper_orders.json 組裝。"""
+    bot_orders = bot_orders_for_mode(ExecMode.PAPER, limit=limit)
+    capital = float(os.getenv("LIVE_TOTAL_CAPITAL", "1000"))
+
+    if bot_orders.empty:
+        return AccountView(
+            mode=ExecMode.PAPER.value,
+            wallet_balance=capital,
+            available_balance=capital,
+            unrealized_pnl=0.0,
+            weighted_leverage=None,
+            win_rate=None,
+            profit_factor=None,
+            realized_pnl=0.0,
+            commission=0.0,
+            funding=0.0,
+            position_count=0,
+            open_order_count=0,
+            positions=pd.DataFrame(),
+            open_orders=pd.DataFrame(),
+            trades=pd.DataFrame(),
+            income=pd.DataFrame(),
+            strategy_stats=pd.DataFrame(),
+        )
+
+    df = bot_orders.copy()
+    df["symbol"] = df["symbol"].astype(str).str.upper()
+    df["side"] = df["side"].astype(str)
+    df["entry"] = pd.to_numeric(df.get("entry"), errors="coerce")
+    df["quantity"] = pd.to_numeric(df.get("quantity"), errors="coerce").fillna(0)
+    df["leverage"] = pd.to_numeric(df.get("leverage"), errors="coerce").fillna(1)
+
+    pos_records: list[dict[str, Any]] = []
+    for (symbol, side), grp in df.groupby(["symbol", "side"]):
+        qty = grp["quantity"].sum()
+        if qty <= 0:
+            continue
+        entry = grp["entry"].astype(float)
+        w = grp["quantity"].astype(float)
+        avg_entry = float((entry * w).sum() / w.sum()) if w.sum() > 0 else 0.0
+        lev = float(grp["leverage"].mean())
+        pos_records.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "size": qty,
+                "entry_price": avg_entry,
+                "mark_price": avg_entry,
+                "unrealized_pnl": 0.0,
+                "leverage": int(round(lev)),
+                "margin_type": grp["margin_type"].iloc[0] if "margin_type" in grp.columns else "cross",
+                "liquidation_price": 0.0,
+            }
+        )
+    positions = pd.DataFrame(pos_records)
+
+    order_records: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        stop = _float(row.get("stop"), 0)
+        tp = _float(row.get("take_profit"), 0)
+        lev = int(_float(row.get("leverage"), 1))
+        if stop > 0:
+            order_records.append(
+                {
+                    "symbol": row["symbol"],
+                    "type": "STOP_MARKET",
+                    "side": "SELL" if row["side"] == "long" else "BUY",
+                    "price": 0.0,
+                    "stop_price": stop,
+                    "quantity": _float(row.get("quantity")),
+                    "filled": 0.0,
+                    "reduce_only": True,
+                    "status": "NEW",
+                    "order_id": "",
+                    "time": row.get("created_at", ""),
+                    "leverage": lev,
+                }
+            )
+        if tp > 0:
+            order_records.append(
+                {
+                    "symbol": row["symbol"],
+                    "type": "TAKE_PROFIT_MARKET",
+                    "side": "SELL" if row["side"] == "long" else "BUY",
+                    "price": 0.0,
+                    "stop_price": tp,
+                    "quantity": _float(row.get("quantity")),
+                    "filled": 0.0,
+                    "reduce_only": True,
+                    "status": "NEW",
+                    "order_id": "",
+                    "time": row.get("created_at", ""),
+                    "leverage": lev,
+                }
+            )
+    open_orders = pd.DataFrame(order_records)
+
+    trade_records: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        trade_records.append(
+            {
+                "time": row.get("created_at", ""),
+                "symbol": row["symbol"],
+                "side": "BUY" if row["side"] == "long" else "SELL",
+                "direction": row["side"],
+                "avg_price": _float(row.get("entry")),
+                "quantity": _float(row.get("quantity")),
+                "quote_qty": _float(row.get("entry")) * _float(row.get("quantity")),
+                "realized_pnl": _float(row.get("realized_pnl")),
+                "commission": 0.0,
+                "commission_asset": "USDT",
+                "order_id": row.get("exchange_order_id", ""),
+                "trade_count": 1,
+                "leverage": int(_float(row.get("leverage"), 1)),
+                "strategy_name": row.get("strategy_name", row.get("strategy_id", "")),
+            }
+        )
+    trades = pd.DataFrame(trade_records)
+    if not trades.empty:
+        trades = trades.sort_values("time", ascending=False).reset_index(drop=True)
+
+    win_rate, pf = compute_trade_stats(trades)
+    strategy_stats = strategy_performance_table(trades)
+
+    return AccountView(
+        mode=ExecMode.PAPER.value,
+        wallet_balance=capital,
+        available_balance=capital,
+        unrealized_pnl=0.0,
+        weighted_leverage=weighted_position_leverage(positions),
+        win_rate=win_rate,
+        profit_factor=pf,
+        realized_pnl=0.0,
+        commission=0.0,
+        funding=0.0,
+        position_count=len(positions),
+        open_order_count=len(open_orders),
+        positions=positions,
+        open_orders=open_orders,
+        trades=trades,
+        income=pd.DataFrame(),
+        strategy_stats=strategy_stats,
+    )

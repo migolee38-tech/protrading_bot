@@ -39,7 +39,8 @@ from core.lightweight_tv import (
     markers_for_strategies,
 )
 from core.market_data import MarketType, fetch_klines, fetch_symbol_last_price, pop_source_note
-from core.binance_credentials import credentials_configured, credentials_hint, mode_label
+from core.binance_credentials import ExecMode, credentials_configured, credentials_hint, mode_label
+from core.futures_account import AccountView, fetch_futures_account, fetch_paper_account
 from core.order_executor import (
     OrderMode,
     OrderRequest,
@@ -949,22 +950,237 @@ def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int)
             st.code("\n".join(ev[-40:]) if ev else "無")
 
 
-def _tab_paper_fills() -> None:
-    """5/20 初版：模擬成交紀錄（原始 JSON 欄位直接顯示）。"""
-    st.subheader("成交紀錄")
-    st.caption("資料來源：data/paper_orders.json（含 paper / testnet / live）· 下單請至「主工作站」右欄")
+def _fmt_leverage(val: float | None) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "—"
+    return f"{float(val):.0f}x" if float(val) == int(float(val)) else f"{float(val):.1f}x"
 
-    orders = list_paper_orders(limit=200)
-    if orders.empty:
-        st.info("尚無模擬單")
+
+def _fmt_pct(val: float | None) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "—"
+    return f"{float(val) * 100:.1f}%"
+
+
+def _fmt_pf(val: float | None) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "—"
+    if val >= 9999:
+        return "∞"
+    return f"{float(val):.2f}"
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_futures_account(mode: str) -> dict:
+    view = fetch_futures_account(ExecMode(mode))
+    return _account_view_to_dict(view)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_paper_account() -> dict:
+    view = fetch_paper_account()
+    return _account_view_to_dict(view)
+
+
+def _account_view_to_dict(view: AccountView) -> dict:
+    return {
+        "mode": view.mode,
+        "wallet_balance": view.wallet_balance,
+        "available_balance": view.available_balance,
+        "unrealized_pnl": view.unrealized_pnl,
+        "weighted_leverage": view.weighted_leverage,
+        "win_rate": view.win_rate,
+        "profit_factor": view.profit_factor,
+        "realized_pnl": view.realized_pnl,
+        "commission": view.commission,
+        "funding": view.funding,
+        "position_count": view.position_count,
+        "open_order_count": view.open_order_count,
+        "error": view.error,
+        "positions": view.positions,
+        "open_orders": view.open_orders,
+        "trades": view.trades,
+        "income": view.income,
+        "strategy_stats": view.strategy_stats,
+    }
+
+
+def _load_account_view(mode: ExecMode) -> AccountView:
+    if mode == ExecMode.PAPER:
+        data = _cached_paper_account()
+    else:
+        data = _cached_futures_account(mode.value)
+    return AccountView(
+        mode=data["mode"],
+        wallet_balance=data["wallet_balance"],
+        available_balance=data["available_balance"],
+        unrealized_pnl=data["unrealized_pnl"],
+        weighted_leverage=data["weighted_leverage"],
+        win_rate=data["win_rate"],
+        profit_factor=data["profit_factor"],
+        realized_pnl=data["realized_pnl"],
+        commission=data["commission"],
+        funding=data["funding"],
+        position_count=data["position_count"],
+        open_order_count=data["open_order_count"],
+        positions=data["positions"],
+        open_orders=data["open_orders"],
+        trades=data["trades"],
+        income=data["income"],
+        strategy_stats=data["strategy_stats"],
+        error=data["error"],
+    )
+
+
+def _display_account_table(df: pd.DataFrame, empty_msg: str, height: int = 280) -> None:
+    if df is None or df.empty:
+        st.info(empty_msg)
+        return
+    st.dataframe(df, use_container_width=True, height=height)
+
+
+def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
+    st.subheader(title)
+    st.caption(caption)
+
+    if mode != ExecMode.PAPER and not credentials_configured(mode):
+        st.warning(credentials_hint(mode))
         return
 
-    show = orders.copy()
-    if "strategy_id" in show.columns:
-        show["strategy_name"] = show["strategy_id"].map(
-            lambda x: STRATEGIES[x].name if x in STRATEGIES else str(x)
-        )
-    st.dataframe(show, use_container_width=True, height=520)
+    col_refresh, _ = st.columns([1, 5])
+    with col_refresh:
+        if st.button("重新整理", key=f"refresh_account_{mode.value}"):
+            if mode == ExecMode.PAPER:
+                _cached_paper_account.clear()
+            else:
+                _cached_futures_account.clear()
+            st.rerun()
+
+    view = _load_account_view(mode)
+    if view.error:
+        st.error(view.error)
+        return
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("錢包餘額 (USDT)", f"{view.wallet_balance:,.2f}")
+    m2.metric("可用餘額", f"{view.available_balance:,.2f}")
+    m3.metric("未實現損益", f"{view.unrealized_pnl:+,.2f}")
+    m4.metric("持倉槓桿", _fmt_leverage(view.weighted_leverage))
+    m5.metric("持倉數", view.position_count)
+    m6.metric("掛單數", view.open_order_count)
+
+    m7, m8, m9, m10, m11 = st.columns(5)
+    m7.metric("勝率", _fmt_pct(view.win_rate))
+    m8.metric("獲利因子", _fmt_pf(view.profit_factor))
+    m9.metric("已實現損益", f"{view.realized_pnl:+,.4f}")
+    m10.metric("手續費", f"{view.commission:+,.4f}")
+    m11.metric("資金費", f"{view.funding:+,.4f}")
+
+    st.markdown("##### 策略績效")
+    stats = view.strategy_stats.copy()
+    if not stats.empty:
+        show_stats = stats.copy()
+        if "leverage" in show_stats.columns:
+            show_stats["leverage"] = show_stats["leverage"].apply(_fmt_leverage)
+        if "win_rate" in show_stats.columns:
+            show_stats["win_rate"] = show_stats["win_rate"].apply(_fmt_pct)
+        if "profit_factor" in show_stats.columns:
+            show_stats["profit_factor"] = show_stats["profit_factor"].apply(_fmt_pf)
+        rename = {
+            "strategy_name": "策略",
+            "symbol": "交易對",
+            "side": "方向",
+            "leverage": "槓桿",
+            "trade_count": "成交筆數",
+            "win_rate": "勝率",
+            "profit_factor": "獲利因子",
+            "avg_price": "成交均價",
+            "realized_pnl": "已實現損益",
+        }
+        show_stats = show_stats.rename(columns={k: v for k, v in rename.items() if k in show_stats.columns})
+        _display_account_table(show_stats, "尚無策略績效", height=220)
+    else:
+        st.info("尚無策略績效（需有成交紀錄）")
+
+    st.markdown("##### 持倉")
+    pos = view.positions.copy()
+    if not pos.empty and "leverage" in pos.columns:
+        pos["leverage"] = pos["leverage"].apply(_fmt_leverage)
+    pos_rename = {
+        "symbol": "交易對",
+        "side": "方向",
+        "size": "數量",
+        "entry_price": "進場價",
+        "mark_price": "標記價",
+        "unrealized_pnl": "未實現損益",
+        "leverage": "槓桿",
+        "margin_type": "保證金模式",
+        "liquidation_price": "強平價",
+    }
+    pos = pos.rename(columns={k: v for k, v in pos_rename.items() if k in pos.columns})
+    _display_account_table(pos, "目前無持倉")
+
+    st.markdown("##### 掛單（止損 / 止盈）")
+    orders = view.open_orders.copy()
+    if not orders.empty and "leverage" in orders.columns:
+        orders["leverage"] = orders["leverage"].apply(_fmt_leverage)
+    ord_rename = {
+        "symbol": "交易對",
+        "type": "類型",
+        "side": "方向",
+        "price": "價格",
+        "stop_price": "觸發價",
+        "quantity": "數量",
+        "filled": "已成交",
+        "reduce_only": "僅減倉",
+        "status": "狀態",
+        "order_id": "訂單ID",
+        "time": "時間",
+        "leverage": "槓桿",
+    }
+    orders = orders.rename(columns={k: v for k, v in ord_rename.items() if k in orders.columns})
+    _display_account_table(orders, "目前無掛單")
+
+    st.markdown("##### 成交明細")
+    trades = view.trades.copy()
+    if not trades.empty:
+        if "leverage" in trades.columns:
+            trades["leverage"] = trades["leverage"].apply(_fmt_leverage)
+        tr_rename = {
+            "time": "時間",
+            "symbol": "交易對",
+            "strategy_name": "策略",
+            "side": "成交方向",
+            "direction": "開單方向",
+            "leverage": "槓桿",
+            "avg_price": "成交均價",
+            "quantity": "數量",
+            "quote_qty": "名義價值",
+            "realized_pnl": "已實現損益",
+            "commission": "手續費",
+            "order_id": "訂單ID",
+            "trade_count": "成交次數",
+        }
+        trades = trades.rename(columns={k: v for k, v in tr_rename.items() if k in trades.columns})
+    _display_account_table(trades, "尚無成交紀錄", height=360)
+
+    st.markdown("##### 損益紀錄")
+    income = view.income.copy()
+    if not income.empty:
+        inc_rename = {
+            "time": "時間",
+            "symbol": "交易對",
+            "income_type": "類型",
+            "income": "金額",
+            "asset": "資產",
+            "info": "說明",
+            "trade_id": "成交ID",
+        }
+        income = income.rename(columns={k: v for k, v in inc_rename.items() if k in income.columns})
+    if mode == ExecMode.PAPER:
+        st.info("本地模擬不寫入交易所損益紀錄；勝率／獲利因子僅依本地成交表計算。")
+    else:
+        _display_account_table(income, "尚無損益紀錄", height=280)
 
 
 def _show_binance_source_banner() -> None:
@@ -1001,7 +1217,9 @@ def main() -> None:
     )
     st.session_state.market = market
 
-    tab_main, tab_bt, tab_fills = st.tabs(["主工作站", "回測覆盤", "模擬成交"])
+    tab_main, tab_bt, tab_live, tab_testnet, tab_paper = st.tabs(
+        ["主工作站", "回測覆盤", "實盤帳戶", "Testnet 帳戶", "本地模擬賬戶"]
+    )
 
     with tab_main:
         st.markdown("---")
@@ -1021,8 +1239,26 @@ def main() -> None:
         strategy_ids = st.session_state.get("active_strategy_ids") or list(STRATEGIES.keys())
         _tab_backtest(strategy_ids, market, kline_limit)
 
-    with tab_fills:
-        _tab_paper_fills()
+    with tab_live:
+        _render_account_tab(
+            ExecMode.LIVE,
+            title="實盤帳戶",
+            caption="資料來源：Binance 永續主網 API · 策略名稱對照本容器 data/paper_orders.json",
+        )
+
+    with tab_testnet:
+        _render_account_tab(
+            ExecMode.TESTNET,
+            title="Testnet 帳戶",
+            caption="資料來源：Binance Testnet 永續 API · 策略名稱對照本容器 data/paper_orders.json",
+        )
+
+    with tab_paper:
+        _render_account_tab(
+            ExecMode.PAPER,
+            title="本地模擬賬戶",
+            caption="資料來源：data/paper_orders.json（mode=paper）· 不需 API 金鑰",
+        )
 
 
 if __name__ == "__main__":
