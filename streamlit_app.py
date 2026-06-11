@@ -1109,10 +1109,13 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
 
     st.markdown("##### 持倉")
     pos = view.positions.copy()
+    if not pos.empty and "strategy_name" in pos.columns:
+        pos["strategy_name"] = pos["strategy_name"].replace("", "未知")
     if not pos.empty and "leverage" in pos.columns:
         pos["leverage"] = pos["leverage"].apply(_fmt_leverage)
     pos_rename = {
         "symbol": "交易對",
+        "strategy_name": "策略",
         "side": "方向",
         "size": "數量",
         "entry_price": "進場價",
