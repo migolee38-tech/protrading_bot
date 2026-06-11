@@ -15,6 +15,19 @@ from core.order_tags import strategy_name_from_client_order_id
 
 
 @dataclass
+class AccountHeadline:
+    """帳戶頂部即時指標（輕量 API，可高頻刷新）。"""
+
+    wallet_balance: float = 0.0
+    available_balance: float = 0.0
+    unrealized_pnl: float = 0.0
+    weighted_leverage: float | None = None
+    position_count: int = 0
+    open_order_count: int = 0
+    error: str | None = None
+
+
+@dataclass
 class AccountView:
     mode: str
     wallet_balance: float
@@ -593,6 +606,67 @@ def _income_df(rows: list[dict]) -> pd.DataFrame:
         )
     df = pd.DataFrame(records)
     return df.sort_values("time", ascending=False).reset_index(drop=True)
+
+
+def fetch_live_headline(mode: ExecMode) -> AccountHeadline:
+    """
+    輕量即時帳戶摘要：account + position_risk + 掛單數。
+    供 Streamlit 頂部指標高頻刷新（未實現損益隨標記價浮動）。
+    """
+    empty = AccountHeadline()
+    if mode == ExecMode.PAPER:
+        capital = float(os.getenv("LIVE_TOTAL_CAPITAL", "1000"))
+        view = fetch_paper_account()
+        return AccountHeadline(
+            wallet_balance=capital,
+            available_balance=capital,
+            unrealized_pnl=view.unrealized_pnl,
+            weighted_leverage=view.weighted_leverage,
+            position_count=view.position_count,
+            open_order_count=view.open_order_count,
+        )
+
+    if not credentials_configured(mode):
+        empty.error = credentials_hint(mode)
+        return empty
+
+    try:
+        settings = FuturesSettings.from_exec_mode(mode)
+        client = create_client(settings)
+        acct = client.account()
+        assets = acct.get("assets", [])
+        usdt = next((a for a in assets if a.get("asset") == "USDT"), {})
+        wallet = _float(usdt.get("walletBalance"))
+        available = _float(usdt.get("availableBalance"))
+
+        positions = _positions_df(client.get_position_risk())
+        unrealized = float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
+        lev = weighted_position_leverage(positions)
+
+        open_count = 0
+        try:
+            raw = client.get_orders()
+            if isinstance(raw, list):
+                open_count = len(raw)
+        except Exception:
+            symbols = (
+                set(positions["symbol"].astype(str).str.upper())
+                if not positions.empty
+                else set()
+            )
+            open_count = len(_fetch_all_open_orders(client, symbols))
+
+        return AccountHeadline(
+            wallet_balance=wallet,
+            available_balance=available,
+            unrealized_pnl=unrealized,
+            weighted_leverage=lev,
+            position_count=len(positions),
+            open_order_count=open_count,
+        )
+    except Exception as e:
+        empty.error = _format_api_error(e)
+        return empty
 
 
 def fetch_futures_account(

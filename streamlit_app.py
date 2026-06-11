@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -40,7 +40,13 @@ from core.lightweight_tv import (
 )
 from core.market_data import MarketType, fetch_klines, fetch_symbol_last_price, pop_source_note
 from core.binance_credentials import ExecMode, credentials_configured, credentials_hint, mode_label
-from core.futures_account import AccountView, fetch_futures_account, fetch_paper_account
+from core.futures_account import (
+    AccountHeadline,
+    AccountView,
+    fetch_futures_account,
+    fetch_live_headline,
+    fetch_paper_account,
+)
 from core.order_executor import (
     OrderMode,
     OrderRequest,
@@ -1034,6 +1040,67 @@ def _load_account_view(mode: ExecMode) -> AccountView:
     )
 
 
+def _render_account_metrics(
+    mode: ExecMode,
+    stats: AccountView,
+    *,
+    headline: AccountHeadline | None = None,
+    live: bool = False,
+) -> None:
+    """頂部摘要指標；headline 為即時 API，stats 為快取中的績效統計。"""
+    wallet = headline.wallet_balance if headline else stats.wallet_balance
+    available = headline.available_balance if headline else stats.available_balance
+    upnl = headline.unrealized_pnl if headline else stats.unrealized_pnl
+    lev = headline.weighted_leverage if headline else stats.weighted_leverage
+    pos_n = headline.position_count if headline else stats.position_count
+    ord_n = headline.open_order_count if headline else stats.open_order_count
+
+    prev_key = f"prev_upnl_{mode.value}"
+    prev_upnl = st.session_state.get(prev_key)
+    upnl_delta = None
+    if live and prev_upnl is not None and abs(upnl - prev_upnl) >= 0.005:
+        upnl_delta = f"{upnl - prev_upnl:+,.2f}"
+    if live:
+        st.session_state[prev_key] = upnl
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("錢包餘額 (USDT)", f"{wallet:,.2f}")
+    m2.metric("可用餘額", f"{available:,.2f}")
+    m3.metric("未實現損益", f"{upnl:+,.2f}", delta=upnl_delta)
+    m4.metric("持倉槓桿", _fmt_leverage(lev))
+    m5.metric("持倉數", pos_n)
+    m6.metric("掛單數", ord_n)
+
+    m7, m8, m9, m10, m11 = st.columns(5)
+    m7.metric("勝率", _fmt_pct(stats.win_rate))
+    m8.metric("獲利因子", _fmt_pf(stats.profit_factor))
+    m9.metric("已實現損益", f"{stats.realized_pnl:+,.4f}")
+    m10.metric("手續費", f"{stats.commission:+,.4f}")
+    m11.metric("資金費", f"{stats.funding:+,.4f}")
+
+    if live:
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        st.caption(
+            f"🔴 即時：未實現損益／餘額約每 10 秒更新（{ts}）"
+            f"　｜　勝率／獲利因子等每 30 秒或按「重新整理」更新"
+        )
+
+
+@st.fragment(run_every=timedelta(seconds=10))
+def _account_live_metrics_fragment() -> None:
+    """Fragment：僅重繪頂部指標，不打斷下方表格捲動位置。"""
+    mode_val = st.session_state.get("_account_live_mode")
+    if not mode_val:
+        return
+    mode = ExecMode(mode_val)
+    headline = fetch_live_headline(mode)
+    if headline.error:
+        st.error(headline.error)
+        return
+    stats = _load_account_view(mode)
+    _render_account_metrics(mode, stats, headline=headline, live=True)
+
+
 def _display_account_table(df: pd.DataFrame, empty_msg: str, height: int = 280) -> None:
     if df is None or df.empty:
         st.info(empty_msg)
@@ -1049,7 +1116,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         st.warning(credentials_hint(mode))
         return
 
-    col_refresh, _ = st.columns([1, 5])
+    col_refresh, col_live, _ = st.columns([1, 2, 4])
     with col_refresh:
         if st.button("重新整理", key=f"refresh_account_{mode.value}"):
             if mode == ExecMode.PAPER:
@@ -1057,6 +1124,14 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             else:
                 _cached_futures_account.clear()
             st.rerun()
+    with col_live:
+        live_default = mode != ExecMode.PAPER
+        live_on = st.toggle(
+            "即時更新頂部數據",
+            value=st.session_state.get(f"account_live_{mode.value}", live_default),
+            key=f"account_live_{mode.value}",
+            help="每 10 秒向 Binance 拉取餘額與未實現損益（Testnet／實盤）",
+        )
 
     view = _load_account_view(mode)
     if view.error:
@@ -1066,20 +1141,13 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
     for warn in view.warnings:
         st.warning(warn)
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("錢包餘額 (USDT)", f"{view.wallet_balance:,.2f}")
-    m2.metric("可用餘額", f"{view.available_balance:,.2f}")
-    m3.metric("未實現損益", f"{view.unrealized_pnl:+,.2f}")
-    m4.metric("持倉槓桿", _fmt_leverage(view.weighted_leverage))
-    m5.metric("持倉數", view.position_count)
-    m6.metric("掛單數", view.open_order_count)
-
-    m7, m8, m9, m10, m11 = st.columns(5)
-    m7.metric("勝率", _fmt_pct(view.win_rate))
-    m8.metric("獲利因子", _fmt_pf(view.profit_factor))
-    m9.metric("已實現損益", f"{view.realized_pnl:+,.4f}")
-    m10.metric("手續費", f"{view.commission:+,.4f}")
-    m11.metric("資金費", f"{view.funding:+,.4f}")
+    if live_on and mode != ExecMode.PAPER:
+        st.session_state["_account_live_mode"] = mode.value
+        _account_live_metrics_fragment()
+    else:
+        _render_account_metrics(mode, view, live=False)
+        if mode == ExecMode.PAPER:
+            st.caption("本地模擬：頂部為模擬資金；開啟即時更新需搭配行情（目前為靜態）。")
 
     st.markdown("##### 策略績效")
     st.caption("列出全部五策略；尚無成交者顯示 0 筆（—）")
