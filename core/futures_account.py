@@ -124,67 +124,66 @@ def attach_leverage_to_orders(
     return out
 
 
-def _fetch_order_strategy_maps(
+def _fetch_orders_by_symbol(
     client: Any,
     symbols: set[str],
-    positions: pd.DataFrame,
     *,
-    order_limit: int = 100,
-) -> tuple[dict[str, str], dict[str, str]]:
-    """
-    從 get_all_orders 建立 orderId -> clientOrderId 與 symbol -> 策略名稱。
-    userTrades 不含 clientOrderId，必須透過訂單紀錄對照。
-    """
-    order_cid: dict[str, str] = {}
-    symbol_strategy: dict[str, str] = {}
-
-    position_sides: dict[str, str] = {}
-    if not positions.empty:
-        for _, row in positions.iterrows():
-            position_sides[str(row["symbol"]).upper()] = str(row["side"])
-
+    order_limit: int = 500,
+) -> dict[str, list[dict]]:
+    """依交易對拉取歷史訂單（含 clientOrderId）。"""
+    out: dict[str, list[dict]] = {}
     for sym in sorted(symbols):
         try:
             raw = client.get_all_orders(symbol=sym, limit=order_limit)
         except Exception:
             continue
-        if not isinstance(raw, list):
-            continue
+        if isinstance(raw, list) and raw:
+            out[sym] = raw
+    return out
 
-        sorted_orders = sorted(raw, key=lambda o: int(o.get("time", 0) or 0), reverse=True)
-        for o in sorted_orders:
+
+def _order_cid_map_from_orders(orders_by_symbol: dict[str, list[dict]]) -> dict[str, str]:
+    order_cid: dict[str, str] = {}
+    for orders in orders_by_symbol.values():
+        for o in orders:
             oid = str(o.get("orderId", "") or "")
             cid = str(o.get("clientOrderId") or o.get("origClientOrderId") or "")
             if oid and cid:
                 order_cid[oid] = cid
+    return order_cid
 
-        pos_side = position_sides.get(sym, "")
-        entry_side = "BUY" if pos_side == "long" else "SELL" if pos_side == "short" else ""
-        for o in sorted_orders:
-            if entry_side and o.get("side") != entry_side:
-                continue
-            if o.get("type") not in ("MARKET",):
-                continue
-            if o.get("status") not in ("FILLED", "PARTIALLY_FILLED"):
-                continue
-            name = strategy_name_from_client_order_id(str(o.get("clientOrderId") or ""))
-            if name:
-                symbol_strategy[sym] = name
-                break
 
-        if sym not in symbol_strategy:
-            for o in sorted_orders:
-                name = strategy_name_from_client_order_id(str(o.get("clientOrderId") or ""))
-                if name:
-                    symbol_strategy[sym] = name
-                    break
-
-    return order_cid, symbol_strategy
+def _strategy_from_entry_orders(
+    orders: list[dict],
+    *,
+    side: str,
+    entry_price: float = 0.0,
+) -> str:
+    """依進場方向與進場價，對到帶 tb_ 標籤的市價進場單。"""
+    entry_side = "BUY" if side == "long" else "SELL"
+    tagged: list[tuple[str, float, int]] = []
+    for o in orders:
+        if o.get("side") != entry_side or o.get("type") != "MARKET":
+            continue
+        if o.get("status") not in ("FILLED", "PARTIALLY_FILLED"):
+            continue
+        name = strategy_name_from_client_order_id(str(o.get("clientOrderId") or ""))
+        if not name:
+            continue
+        avg_p = _float(o.get("avgPrice") or o.get("price"))
+        tagged.append((name, avg_p, int(o.get("time") or 0)))
+    if not tagged:
+        return ""
+    if entry_price > 0:
+        tagged.sort(key=lambda x: (abs(x[1] - entry_price) / max(entry_price, 1e-12), -x[2]))
+    else:
+        tagged.sort(key=lambda x: -x[2])
+    return tagged[0][0]
 
 
 def attach_strategy_to_positions(
     positions: pd.DataFrame,
-    symbol_strategy: dict[str, str],
+    orders_by_symbol: dict[str, list[dict]],
     bot_orders: pd.DataFrame,
 ) -> pd.DataFrame:
     if positions.empty:
@@ -199,10 +198,31 @@ def attach_strategy_to_positions(
             if n:
                 bot_sym[sym] = str(n)
 
-    out["strategy_name"] = [
-        symbol_strategy.get(str(sym).upper()) or bot_sym.get(str(sym).upper(), "")
-        for sym in out["symbol"]
-    ]
+    names: list[str] = []
+    for _, row in out.iterrows():
+        sym = str(row["symbol"]).upper()
+        orders = orders_by_symbol.get(sym, [])
+        name = _strategy_from_entry_orders(
+            orders,
+            side=str(row["side"]),
+            entry_price=_float(row.get("entry_price")),
+        )
+        if not name:
+            name = bot_sym.get(sym, "")
+        names.append(name)
+    out["strategy_name"] = names
+    return out
+
+
+def _symbol_strategy_from_positions(positions: pd.DataFrame) -> dict[str, str]:
+    if positions.empty or "strategy_name" not in positions.columns:
+        return {}
+    out: dict[str, str] = {}
+    for _, row in positions.iterrows():
+        sym = str(row["symbol"]).upper()
+        name = str(row.get("strategy_name", "") or "").strip()
+        if name:
+            out[sym] = name
     return out
 
 
@@ -305,6 +325,64 @@ def _strategy_stats_from_positions(positions: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def merge_strategy_performance(trades: pd.DataFrame, positions: pd.DataFrame) -> pd.DataFrame:
+    """合併成交績效、持倉策略，並補齊五策略空白列。"""
+    stats = strategy_performance_table(trades)
+    pos_stats = _strategy_stats_from_positions(positions)
+    if not pos_stats.empty:
+        if stats.empty:
+            stats = pos_stats.copy()
+        else:
+            existing = set(
+                zip(
+                    stats["strategy_name"].astype(str),
+                    stats["symbol"].astype(str),
+                    stats["side"].astype(str),
+                )
+            )
+            extra_rows = [
+                row.to_dict()
+                for _, row in pos_stats.iterrows()
+                if (str(row["strategy_name"]), str(row["symbol"]), str(row["side"])) not in existing
+            ]
+            if extra_rows:
+                stats = pd.concat([stats, pd.DataFrame(extra_rows)], ignore_index=True)
+    return complete_all_strategy_rows(stats)
+
+
+def complete_all_strategy_rows(stats: pd.DataFrame) -> pd.DataFrame:
+    """確保五策略皆有一列（尚無成交顯示 0 筆）。"""
+    from core.strategy_registry import STRATEGIES
+
+    base = stats.copy() if stats is not None and not stats.empty else pd.DataFrame()
+    present: set[str] = set()
+    if not base.empty and "strategy_name" in base.columns:
+        present = set(base["strategy_name"].astype(str).tolist())
+
+    placeholders: list[dict[str, Any]] = []
+    for meta in STRATEGIES.values():
+        if meta.name in present:
+            continue
+        placeholders.append(
+            {
+                "strategy_name": meta.name,
+                "symbol": "—",
+                "side": "—",
+                "leverage": None,
+                "trade_count": 0,
+                "win_rate": None,
+                "profit_factor": None,
+                "avg_price": None,
+                "realized_pnl": 0.0,
+            }
+        )
+    if placeholders:
+        base = pd.concat([base, pd.DataFrame(placeholders)], ignore_index=True)
+    if base.empty:
+        return base
+    return base.sort_values("strategy_name").reset_index(drop=True)
 
 
 def strategy_performance_table(trades: pd.DataFrame) -> pd.DataFrame:
@@ -591,7 +669,10 @@ def fetch_futures_account(
 
     symbols = _collect_symbols(positions, open_orders, income, bot_orders)
 
-    order_cid_map, symbol_strategy = _fetch_order_strategy_maps(client, symbols, positions)
+    orders_by_symbol = _fetch_orders_by_symbol(client, symbols)
+    order_cid_map = _order_cid_map_from_orders(orders_by_symbol)
+    positions = attach_strategy_to_positions(positions, orders_by_symbol, bot_orders)
+    symbol_strategy = _symbol_strategy_from_positions(positions)
 
     trade_rows: list[dict] = []
     for sym in sorted(symbols):
@@ -610,17 +691,13 @@ def fetch_futures_account(
         order_cid_map=order_cid_map,
         symbol_strategy=symbol_strategy,
     )
-    positions = attach_strategy_to_positions(positions, symbol_strategy, bot_orders)
-
     if not open_orders.empty and "client_order_id" in open_orders.columns:
         open_orders["strategy_name"] = open_orders["client_order_id"].map(
             lambda cid: strategy_name_from_client_order_id(str(cid or ""))
         )
 
     win_rate, pf = compute_trade_stats(trades)
-    strategy_stats = strategy_performance_table(trades)
-    if strategy_stats.empty and not positions.empty and "strategy_name" in positions.columns:
-        strategy_stats = _strategy_stats_from_positions(positions)
+    strategy_stats = merge_strategy_performance(trades, positions)
     unrealized = float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
 
     return AccountView(
@@ -775,7 +852,7 @@ def fetch_paper_account(*, limit: int = 500) -> AccountView:
         trades = trades.sort_values("time", ascending=False).reset_index(drop=True)
 
     win_rate, pf = compute_trade_stats(trades)
-    strategy_stats = strategy_performance_table(trades)
+    strategy_stats = merge_strategy_performance(trades, positions)
 
     return AccountView(
         mode=ExecMode.PAPER.value,

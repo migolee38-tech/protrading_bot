@@ -1082,6 +1082,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
     m11.metric("資金費", f"{view.funding:+,.4f}")
 
     st.markdown("##### 策略績效")
+    st.caption("列出全部五策略；尚無成交者顯示 0 筆（—）")
     stats = view.strategy_stats.copy()
     if not stats.empty:
         show_stats = stats.copy()
