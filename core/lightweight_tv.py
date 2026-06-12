@@ -127,8 +127,6 @@ def markers_for_strategies(prep_for_tf: pd.DataFrame, strategy_ids: list[str]) -
     strat_labels = {
         "ema": "E",
         "donchian": "D",
-        "rsi": "R",
-        "macd": "M",
         "hunting_funding": "H",
     }
 

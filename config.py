@@ -3,7 +3,7 @@
 DEFAULT_SYMBOL = "BTC/USDT"
 
 # --- EMA 趨勢交叉策略（勿與唐奇安共用下列參數）---
-STRATEGY = "ema"  # "ema" | "donchian" | "rsi" | "macd" | "hunting_funding"
+STRATEGY = "ema"  # "ema" | "donchian" | "hunting_funding"
 TIMEFRAME = "5m"
 
 EMA_FAST = 12

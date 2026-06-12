@@ -351,7 +351,7 @@ def _strategy_stats_from_positions(positions: pd.DataFrame) -> pd.DataFrame:
 
 
 def merge_strategy_performance(trades: pd.DataFrame, positions: pd.DataFrame) -> pd.DataFrame:
-    """合併成交績效、持倉策略，並補齊五策略空白列。"""
+    """合併成交績效、持倉策略，並補齊全部策略空白列。"""
     stats = strategy_performance_table(trades)
     pos_stats = _strategy_stats_from_positions(positions)
     if not pos_stats.empty:
@@ -376,7 +376,7 @@ def merge_strategy_performance(trades: pd.DataFrame, positions: pd.DataFrame) ->
 
 
 def complete_all_strategy_rows(stats: pd.DataFrame) -> pd.DataFrame:
-    """確保五策略皆有一列（尚無成交顯示 0 筆）。"""
+    """確保全部策略皆有一列（尚無成交顯示 0 筆）。"""
     from core.strategy_registry import STRATEGIES
 
     base = stats.copy() if stats is not None and not stats.empty else pd.DataFrame()

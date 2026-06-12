@@ -2,7 +2,7 @@
 """
 多策略 24/7 自動交易 — 多帳戶單進程輪詢
 
-策略：EMA、唐奇安、RSI、MACD、Hunting Funding（預設全部啟用）
+策略：EMA、唐奇安、Hunting Funding（預設全部啟用）
 
 用法：
   python live_runner.py --verify-only --profiles all

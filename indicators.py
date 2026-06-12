@@ -61,9 +61,5 @@ def min_bars_required() -> int:
         )
     if cfg.STRATEGY == "donchian":
         return cfg.DONCHIAN_LEN + cfg.DONCHIAN_ENTRY_EXPIRE_BARS + 8
-    if cfg.STRATEGY == "rsi":
-        return cfg.TREND_BARS_MIN + cfg.STOP_LOOKBACK + 30
-    if cfg.STRATEGY == "macd":
-        return cfg.TREND_BARS_MIN + cfg.STOP_LOOKBACK + 35
     warmup = max(cfg.EMA_SLOW, cfg.EMA_VOLUME_PRICE, cfg.VOLUME_MA) + 5
     return cfg.TREND_BARS_MIN + cfg.STOP_LOOKBACK + warmup

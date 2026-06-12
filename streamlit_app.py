@@ -1206,7 +1206,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             st.caption("本地模擬：頂部為模擬資金；開啟即時更新需搭配行情（目前為靜態）。")
 
     st.markdown("##### 策略績效")
-    st.caption("列出全部五策略；尚無成交者顯示 0 筆（—）")
+    st.caption("列出全部策略；尚無成交者顯示 0 筆（—）")
     stats = view.strategy_stats.copy()
     if not stats.empty:
         show_stats = stats.copy()

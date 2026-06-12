@@ -24,8 +24,6 @@ from strategies.donchian_multi_tp import (
 )
 from strategies.ema_trend_cross import Signal as EmaSignal
 from strategies.ema_trend_cross import evaluate_bar as ema_evaluate_bar
-from strategies.macd_momentum import evaluate_bar as macd_evaluate_bar
-from strategies.rsi_reversal import evaluate_bar as rsi_evaluate_bar
 
 
 @dataclass
@@ -161,10 +159,6 @@ class TradingEngine:
         start = min_bars_required()
         if cfg.STRATEGY == "donchian":
             self._run_donchian(df, start)
-        elif cfg.STRATEGY == "rsi":
-            self._run_instant_entry(df, start, rsi_evaluate_bar)
-        elif cfg.STRATEGY == "macd":
-            self._run_instant_entry(df, start, macd_evaluate_bar)
         else:
             self._run_ema(df, start)
         return self.log
