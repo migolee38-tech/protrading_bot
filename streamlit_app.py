@@ -58,6 +58,15 @@ from core.futures_account import (
     fetch_live_headline_for_profile,
 )
 from core.stats_reset import clear_stats_reset, set_stats_reset_now
+from core.tz_display import (
+    DISPLAY_TZ_NAME,
+    end_of_day_display,
+    format_any_time_display,
+    format_datetime_display,
+    now_display,
+    start_of_day_display,
+    today_display,
+)
 from core.order_executor import (
     OrderMode,
     OrderRequest,
@@ -789,6 +798,9 @@ def _order_right_panel(
     else:
         here = orders
     show = here if not here.empty else orders.tail(8)
+    if "created_at" in show.columns:
+        show = show.copy()
+        show["created_at"] = show["created_at"].map(format_any_time_display)
     cols_pref = [
         c
         for c in [
@@ -807,7 +819,10 @@ def _order_right_panel(
         ]
         if c in show.columns
     ]
-    st.dataframe(show[cols_pref] if cols_pref else show, use_container_width=True, height=240)
+    display = show[cols_pref] if cols_pref else show
+    if "created_at" in display.columns:
+        display = display.rename(columns={"created_at": f"下單時間 ({DISPLAY_TZ_NAME})"})
+    st.dataframe(display, use_container_width=True, height=240)
 
 
 def _render_chart_block(
@@ -1156,9 +1171,9 @@ def _render_account_metrics(
     m11.metric("資金費", f"{stats.funding:+,.4f}")
 
     if live:
-        ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        ts = now_display().strftime("%H:%M:%S")
         st.caption(
-            f"🔴 即時：未實現損益／餘額約每 10 秒更新（{ts}）"
+            f"🔴 即時：未實現損益／餘額約每 10 秒更新（{ts} {DISPLAY_TZ_NAME}）"
             f"　｜　勝率／獲利因子等每 30 秒或按「重新整理」更新"
         )
 
@@ -1186,29 +1201,22 @@ def _resolve_account_date_range(
     preset: str,
     custom_range: tuple[date, date] | date | None,
 ) -> tuple[datetime | None, datetime | None]:
-    now = datetime.now(timezone.utc)
-    today = now.date()
+    now = now_display()
+    today = today_display()
     if preset == "全部":
         return None, None
     if preset == "今天":
-        start = datetime.combine(today, time.min, tzinfo=timezone.utc)
-        return start, now
+        return start_of_day_display(today), now
     if preset == "近 7 天":
-        start_day = today - timedelta(days=6)
-        start = datetime.combine(start_day, time.min, tzinfo=timezone.utc)
-        return start, now
+        return start_of_day_display(today - timedelta(days=6)), now
     if preset == "近 30 天":
-        start_day = today - timedelta(days=29)
-        start = datetime.combine(start_day, time.min, tzinfo=timezone.utc)
-        return start, now
+        return start_of_day_display(today - timedelta(days=29)), now
     if preset == "自訂" and custom_range:
         if isinstance(custom_range, tuple) and len(custom_range) == 2:
             d0, d1 = custom_range
         else:
             d0 = d1 = custom_range  # type: ignore[assignment]
-        start = datetime.combine(d0, time.min, tzinfo=timezone.utc)
-        end = datetime.combine(d1, time.max, tzinfo=timezone.utc)
-        return start, end
+        return start_of_day_display(d0), end_of_day_display(d1)
     return None, None
 
 
@@ -1255,7 +1263,7 @@ def _render_account_filters(profile_id: str) -> tuple[datetime | None, datetime 
         if preset == "自訂":
             custom_range = st.date_input(
                 "自訂日期",
-                value=(date.today() - timedelta(days=7), date.today()),
+                value=(today_display() - timedelta(days=7), today_display()),
                 key=f"acct_date_custom_{profile_id}",
             )
     with c3:
@@ -1267,6 +1275,16 @@ def _render_account_filters(profile_id: str) -> tuple[datetime | None, datetime 
         )
     date_start, date_end = _resolve_account_date_range(preset, custom_range)
     return date_start, date_end, tf_filter
+
+
+def _format_time_columns(df: pd.DataFrame, cols: tuple[str, ...]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    for col in cols:
+        if col in out.columns:
+            out[col] = out[col].map(format_any_time_display)
+    return out
 
 
 def _display_account_table(df: pd.DataFrame, empty_msg: str, height: int = 280) -> None:
@@ -1281,7 +1299,9 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
     account_id = _account_selector(mode, key_suffix="tab")
     profile = load_profile(account_id, mode)
     profile_id = profile.profile_id
-    st.caption(f"{caption}　·　目前：{profile.display_name}")
+    st.caption(
+        f"{caption}　·　目前：{profile.display_name}　·　時間：{DISPLAY_TZ_NAME}"
+    )
 
     if mode != ExecMode.PAPER and not credentials_configured(mode, account_id):
         st.warning(credentials_hint(mode, account_id))
@@ -1356,8 +1376,8 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         parts: list[str] = []
         if date_start or date_end:
             parts.append(
-                f"日期：{date_start.strftime('%Y-%m-%d') if date_start else '…'}"
-                f" ~ {date_end.strftime('%Y-%m-%d %H:%M UTC') if date_end else '…'}"
+                f"日期：{format_datetime_display(date_start) if date_start else '…'}"
+                f" ~ {format_datetime_display(date_end) if date_end else '…'}"
             )
         if tf_filter != "全部週期":
             parts.append(f"週期：{tf_filter}")
@@ -1394,6 +1414,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             "realized_pnl": "已實現損益",
         }
         show_stats = show_stats.rename(columns={k: v for k, v in rename.items() if k in show_stats.columns})
+        show_stats = _format_time_columns(show_stats, ("開單時間",))
         _display_account_table(show_stats, "尚無策略績效", height=220)
     else:
         st.info("尚無策略績效（需有成交紀錄，或調整篩選條件）")
@@ -1424,6 +1445,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         "liquidation_price": "強平價",
     }
     pos = pos.rename(columns={k: v for k, v in pos_rename.items() if k in pos.columns})
+    pos = _format_time_columns(pos, ("開單時間",))
     _display_account_table(pos, "目前無持倉（或篩選後無資料）")
 
     st.markdown("##### 掛單（止損 / 止盈）")
@@ -1453,6 +1475,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         "leverage": "槓桿",
     }
     orders = orders.rename(columns={k: v for k, v in ord_rename.items() if k in orders.columns})
+    orders = _format_time_columns(orders, ("開單時間", "掛單時間"))
     _display_account_table(orders, "目前無掛單（或篩選後無資料）")
 
     st.markdown("##### 成交明細")
@@ -1482,6 +1505,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             "trade_count": "成交次數",
         }
         trades = trades.rename(columns={k: v for k, v in tr_rename.items() if k in trades.columns})
+        trades = _format_time_columns(trades, ("時間",))
     _display_account_table(trades, "尚無成交紀錄（或篩選後無資料）", height=360)
 
     st.markdown("##### 損益紀錄")
@@ -1497,6 +1521,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             "trade_id": "成交ID",
         }
         income = income.rename(columns={k: v for k, v in inc_rename.items() if k in income.columns})
+        income = _format_time_columns(income, ("時間",))
     if mode == ExecMode.PAPER:
         st.info("本地模擬不寫入交易所損益紀錄；勝率／獲利因子僅依本地成交表計算。")
     else:

@@ -62,11 +62,12 @@ def _float(val: Any, default: float = 0.0) -> float:
 
 
 def _ms_to_iso(ms: Any) -> str:
+    """內部儲存用 UTC ISO（篩選／統計用）；顯示時再轉台北時間。"""
     if ms is None:
         return ""
     try:
         ts = int(ms)
-        return pd.to_datetime(ts, unit="ms", utc=True).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return pd.to_datetime(ts, unit="ms", utc=True).isoformat()
     except (TypeError, ValueError):
         return str(ms)
 
@@ -1029,7 +1030,7 @@ def fetch_paper_account(*, account_id: str = "account1", limit: int = 500) -> Ac
         tp = _float(row.get("take_profit"), 0)
         lev = int(_float(row.get("leverage"), 1))
         entry_px = _float(row.get("entry"))
-        open_ts = row.get("created_at", "")
+        open_ts = str(row.get("created_at", "") or "")
         if stop > 0:
             order_records.append(
                 {

@@ -39,10 +39,12 @@ def get_stats_reset_at(profile: AccountProfile) -> pd.Timestamp | None:
 
 
 def get_stats_reset_label(profile: AccountProfile) -> str:
+    from core.tz_display import format_datetime_display
+
     ts = get_stats_reset_at(profile)
     if ts is None:
         return ""
-    return ts.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return format_datetime_display(ts.to_pydatetime(), with_label=True)
 
 
 def set_stats_reset_now(profile: AccountProfile) -> str:
