@@ -20,6 +20,12 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+from core.binance_futures import (
+    ensure_tradable_symbol,
+    format_binance_error,
+    get_tradable_symbols,
+    place_algo_conditional_order,
+)
 from core.order_tags import build_client_order_id
 from core.universe import top_usdt_pairs_by_volume
 
@@ -154,8 +160,23 @@ def resolve_symbols(cfg: Config) -> list[str]:
     """將設定中的 symbol 解析為實際交易對清單。"""
     sym = cfg.symbol.upper()
     if sym in (SYMBOL_TOP, "ALL"):
-        return fetch_top_volume_symbols(cfg.top_n)
-    return [sym]
+        symbols = fetch_top_volume_symbols(cfg.top_n)
+    else:
+        symbols = [sym]
+    if not cfg.auto_trade or not HAS_BINANCE_CLIENT:
+        return symbols
+    try:
+        client = make_futures_client(cfg)
+        tradable = get_tradable_symbols(client, testnet=cfg.testnet)
+        filtered = [s for s in symbols if s.upper() in tradable]
+        skipped = len(symbols) - len(filtered)
+        if skipped:
+            net = "Testnet" if cfg.testnet else "主網"
+            log.info(f"略過 {skipped} 個在 {net} 不可交易的 symbol")
+        return filtered
+    except Exception as e:
+        log.warning(f"過濾可交易 symbol 失敗: {format_binance_error(e)}")
+        return symbols
 
 
 def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
@@ -865,6 +886,12 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
         return
 
     try:
+        ensure_tradable_symbol(client, symbol, testnet=cfg.testnet)
+    except ValueError as e:
+        log.error(str(e))
+        return
+
+    try:
         entry_cid = build_client_order_id("hunting_funding", symbol)
         client.new_order(
             symbol=symbol,
@@ -875,28 +902,40 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
         )
         log.info(f"已下單 {side} {qty} {symbol} @ market")
 
-        # 初始止損（全倉）
-        client.new_order(
-            symbol=symbol, side=exit_side, type="STOP_MARKET",
-            stopPrice=round(lv["sl"], 8), quantity=qty, reduceOnly=True,
+        # 初始止損（全倉）— Algo Order API
+        place_algo_conditional_order(
+            client,
+            symbol=symbol,
+            side=exit_side,
+            order_type="STOP_MARKET",
+            trigger_price=lv["sl"],
+            quantity=qty,
         )
-        log.info(f"初始止損 @ {lv['sl']:.4f}")
+        log.info(f"初始止損 Algo @ {lv['sl']:.4f}")
 
         # 1R 減倉 30%
         if qty_tp1 > 0:
-            client.new_order(
-                symbol=symbol, side=exit_side, type="TAKE_PROFIT_MARKET",
-                stopPrice=round(lv["r1"], 8), quantity=qty_tp1, reduceOnly=True,
+            place_algo_conditional_order(
+                client,
+                symbol=symbol,
+                side=exit_side,
+                order_type="TAKE_PROFIT_MARKET",
+                trigger_price=lv["r1"],
+                quantity=qty_tp1,
             )
-            log.info(f"1R 減倉{reduce_pct*100:.0f}% @ {lv['r1']:.4f}  qty={qty_tp1}")
+            log.info(f"1R 減倉{reduce_pct*100:.0f}% Algo @ {lv['r1']:.4f}  qty={qty_tp1}")
 
         # 5R 全出剩餘倉位
         if qty_rest > 0:
-            client.new_order(
-                symbol=symbol, side=exit_side, type="TAKE_PROFIT_MARKET",
-                stopPrice=round(lv["r5"], 8), quantity=qty_rest, reduceOnly=True,
+            place_algo_conditional_order(
+                client,
+                symbol=symbol,
+                side=exit_side,
+                order_type="TAKE_PROFIT_MARKET",
+                trigger_price=lv["r5"],
+                quantity=qty_rest,
             )
-            log.info(f"5R 全出 @ {lv['r5']:.4f}  qty={qty_rest}")
+            log.info(f"5R 全出 Algo @ {lv['r5']:.4f}  qty={qty_rest}")
 
         log.info(
             f"保證金 {margin:.2f}U ({cfg.position_pct}% of {cfg.total_capital}U)  "
@@ -904,7 +943,7 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
             f"3R觸及後止損移至1R價 {lv['r1']:.4f}；5R全出"
         )
     except Exception as e:
-        log.error(f"下單失敗: {e}")
+        log.error(f"下單失敗: {format_binance_error(e)}")
 
 
 def _kline_limit(cfg: Config) -> int:

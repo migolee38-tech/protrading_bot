@@ -10,7 +10,7 @@ import pandas as pd
 
 from core.backtest_pnl import profit_factor_from_pnls
 from core.binance_credentials import ExecMode, credentials_configured, credentials_hint
-from core.binance_futures import FuturesSettings, create_client
+from core.binance_futures import FuturesSettings, create_client, fetch_open_algo_orders
 from core.order_tags import strategy_name_from_client_order_id
 
 
@@ -564,27 +564,47 @@ def _collect_symbols(
     return {s for s in symbols if s and s != "nan"}
 
 
+def _normalize_algo_open_order(row: dict) -> dict:
+    """將 Algo 條件單對齊一般 open order 欄位。"""
+    return {
+        "symbol": row.get("symbol", ""),
+        "type": row.get("orderType") or row.get("type", ""),
+        "side": row.get("side", ""),
+        "price": row.get("price", 0),
+        "stopPrice": row.get("triggerPrice"),
+        "origQty": row.get("quantity"),
+        "executedQty": 0,
+        "reduceOnly": True,
+        "status": row.get("algoStatus", ""),
+        "orderId": row.get("algoId", ""),
+        "clientOrderId": row.get("clientAlgoId", ""),
+        "time": row.get("createTime") or row.get("updateTime"),
+    }
+
+
 def _fetch_all_open_orders(client: Any, symbols: set[str]) -> list[dict]:
     """
-    查詢全部掛單。
+    查詢全部掛單（含 Algo 條件單）。
     binance-futures-connector 的 get_open_orders(symbol) 為單筆查詢；
     get_orders() 對應 GET /fapi/v1/openOrders，可不帶 symbol。
     """
-    try:
-        rows = client.get_orders()
-        if isinstance(rows, list):
-            return rows
-    except Exception:
-        pass
-
     rows: list[dict] = []
-    for sym in sorted(symbols):
-        try:
-            part = client.get_orders(symbol=sym)
-            if isinstance(part, list):
-                rows.extend(part)
-        except Exception:
-            continue
+    try:
+        part = client.get_orders()
+        if isinstance(part, list):
+            rows.extend(part)
+    except Exception:
+        for sym in sorted(symbols):
+            try:
+                part = client.get_orders(symbol=sym)
+                if isinstance(part, list):
+                    rows.extend(part)
+            except Exception:
+                continue
+
+    for algo in fetch_open_algo_orders(client):
+        rows.append(_normalize_algo_open_order(algo))
+
     return rows
 
 
@@ -643,18 +663,12 @@ def fetch_live_headline(mode: ExecMode) -> AccountHeadline:
         unrealized = float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
         lev = weighted_position_leverage(positions)
 
-        open_count = 0
-        try:
-            raw = client.get_orders()
-            if isinstance(raw, list):
-                open_count = len(raw)
-        except Exception:
-            symbols = (
-                set(positions["symbol"].astype(str).str.upper())
-                if not positions.empty
-                else set()
-            )
-            open_count = len(_fetch_all_open_orders(client, symbols))
+        symbols = (
+            set(positions["symbol"].astype(str).str.upper())
+            if not positions.empty
+            else set()
+        )
+        open_count = len(_fetch_all_open_orders(client, symbols))
 
         return AccountHeadline(
             wallet_balance=wallet,

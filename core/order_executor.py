@@ -14,9 +14,12 @@ import pandas as pd
 
 from core.binance_credentials import ExecMode, credentials_configured, credentials_hint, mode_label
 from core.binance_futures import (
+    BracketOrderError,
     FuturesSettings,
     calc_order_quantity,
     create_client,
+    ensure_tradable_symbol,
+    format_binance_error,
     place_bracket_order,
     resolve_leverage,
 )
@@ -137,25 +140,43 @@ def place_futures_order(req: OrderRequest) -> dict:
         )
 
     sym = req.symbol.replace("/", "").upper()
+    ensure_tradable_symbol(client, sym, testnet=settings.testnet)
     client_order_id = build_client_order_id(req.strategy_id, sym)
-    result = place_bracket_order(
-        client,
-        symbol=sym,
-        side=req.side,
-        quantity=qty,
-        stop=req.stop,
-        take_profit=req.take_profit,
-        leverage=lev,
-        strategy_id=req.strategy_id,
-        client_order_id=client_order_id,
-    )
+
+    try:
+        bracket = place_bracket_order(
+            client,
+            symbol=sym,
+            side=req.side,
+            quantity=qty,
+            stop=req.stop,
+            take_profit=req.take_profit,
+            leverage=lev,
+            strategy_id=req.strategy_id,
+            client_order_id=client_order_id,
+            testnet=settings.testnet,
+        )
+    except BracketOrderError as e:
+        row = req.to_dict()
+        row["quantity"] = qty
+        row["leverage"] = lev
+        row["status"] = "filled_naked"
+        row["exchange_order_id"] = e.result.entry.get("orderId")
+        row["client_order_id"] = e.result.entry.get("clientOrderId") or client_order_id
+        row["error"] = str(e)
+        _append_order(row)
+        raise ValueError(str(e)) from e
 
     row = req.to_dict()
     row["quantity"] = qty
     row["leverage"] = lev
     row["status"] = "filled_testnet" if req.mode == OrderMode.TESTNET else "filled_live"
-    row["exchange_order_id"] = result.get("orderId")
-    row["client_order_id"] = result.get("clientOrderId") or client_order_id
+    row["exchange_order_id"] = bracket.entry.get("orderId")
+    row["client_order_id"] = bracket.entry.get("clientOrderId") or client_order_id
+    if bracket.stop_algo:
+        row["stop_algo_id"] = bracket.stop_algo.get("algoId")
+    if bracket.take_profit_algo:
+        row["take_profit_algo_id"] = bracket.take_profit_algo.get("algoId")
     return _append_order(row)
 
 
@@ -282,7 +303,7 @@ def scan_and_execute(
             try:
                 placed.append(place_order(req, market=market))
             except Exception as e:
-                log.error(f"{order_mode.value} 下單失敗 {bin_sym} {sid}: {e}")
+                log.error(f"{order_mode.value} 下單失敗 {bin_sym} {sid}: {format_binance_error(e)}")
     return placed
 
 

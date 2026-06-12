@@ -25,7 +25,13 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 from core.binance_credentials import ExecMode, mode_label
-from core.binance_futures import FuturesSettings, verify_connection
+from core.binance_futures import (
+    FuturesSettings,
+    create_client,
+    format_binance_error,
+    get_tradable_symbols,
+    verify_connection,
+)
 from core.market_data import MarketType, fetch_klines
 from core.order_executor import OrderMode, OrderRequest, place_order
 from core.strategy_registry import STRATEGIES, get_strategy, scan_signals_for, with_symbol
@@ -92,10 +98,24 @@ def _resolve_symbols(top_n: int) -> list[str]:
     return df["symbol"].tolist()
 
 
+def _filter_tradable_symbols(symbols: list[str], cfg: RunnerConfig) -> list[str]:
+    if cfg.exec_mode == ExecMode.PAPER:
+        return symbols
+    client = create_client(cfg.futures)
+    tradable = get_tradable_symbols(client, testnet=cfg.futures.testnet)
+    filtered = [s for s in symbols if s.replace("/", "").upper() in tradable]
+    skipped = len(symbols) - len(filtered)
+    if skipped:
+        log.info(
+            f"略過 {skipped} 個在 {mode_label(cfg.exec_mode)} 不可交易的 symbol"
+        )
+    return filtered
+
+
 def _scan_round(cfg: RunnerConfig) -> list[dict]:
-    symbols = _resolve_symbols(cfg.top_n)
+    symbols = _filter_tradable_symbols(_resolve_symbols(cfg.top_n), cfg)
     if not symbols:
-        log.warning("成交量榜單為空，略過本輪。")
+        log.warning("成交量榜單為空或無可交易 symbol，略過本輪。")
         return []
 
     order_mode = OrderMode(cfg.exec_mode.value)
@@ -158,7 +178,9 @@ def _scan_round(cfg: RunnerConfig) -> list[dict]:
                 executed[key] = row["created_at"]
                 log.info(f"[{order_mode.value}] {sid} {bin_sym} {last.side}")
             except Exception as e:
-                log.error(f"[{order_mode.value}] {sid} {bin_sym} 下單失敗: {e}")
+                log.error(
+                    f"[{order_mode.value}] {sid} {bin_sym} 下單失敗: {format_binance_error(e)}"
+                )
 
     if len(executed) > 5000:
         executed = dict(list(executed.items())[-3000:])
