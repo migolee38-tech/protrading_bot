@@ -147,6 +147,31 @@ def attach_leverage_to_orders(
     return out
 
 
+def attach_entry_meta_to_orders(
+    open_orders: pd.DataFrame,
+    positions: pd.DataFrame,
+) -> pd.DataFrame:
+    """掛單表補上對應持倉的進場價、開單時間、策略名。"""
+    if open_orders.empty:
+        return open_orders
+    out = open_orders.copy()
+    entry_map: dict[str, float] = {}
+    time_map: dict[str, str] = {}
+    strat_map: dict[str, str] = {}
+    if not positions.empty:
+        for _, row in positions.iterrows():
+            sym = str(row["symbol"]).upper()
+            entry_map[sym] = _float(row.get("entry_price"))
+            time_map[sym] = str(row.get("open_time", "") or "")
+            strat_map[sym] = str(row.get("strategy_name", "") or "")
+    sym_u = out["symbol"].astype(str).str.upper()
+    out["entry_price"] = sym_u.map(entry_map)
+    out["open_time"] = sym_u.map(time_map)
+    if "strategy_name" not in out.columns:
+        out["strategy_name"] = sym_u.map(strat_map)
+    return out
+
+
 def _fetch_orders_by_symbol(
     client: Any,
     symbols: set[str],
@@ -176,13 +201,13 @@ def _order_cid_map_from_orders(orders_by_symbol: dict[str, list[dict]]) -> dict[
     return order_cid
 
 
-def _strategy_from_entry_orders(
+def _best_entry_order(
     orders: list[dict],
     *,
     side: str,
     entry_price: float = 0.0,
-) -> str:
-    """依進場方向與進場價，對到帶 tb_ 標籤的市價進場單。"""
+) -> tuple[str, float, int]:
+    """依進場方向與進場價，對到最佳匹配的市價進場單 → (策略名, 進場價, time_ms)。"""
     entry_side = "BUY" if side == "long" else "SELL"
     tagged: list[tuple[str, float, int]] = []
     for o in orders:
@@ -191,17 +216,26 @@ def _strategy_from_entry_orders(
         if o.get("status") not in ("FILLED", "PARTIALLY_FILLED"):
             continue
         name = strategy_name_from_client_order_id(str(o.get("clientOrderId") or ""))
-        if not name:
-            continue
         avg_p = _float(o.get("avgPrice") or o.get("price"))
-        tagged.append((name, avg_p, int(o.get("time") or 0)))
+        t_ms = int(o.get("time") or o.get("updateTime") or 0)
+        tagged.append((name, avg_p, t_ms))
     if not tagged:
-        return ""
+        return "", 0.0, 0
     if entry_price > 0:
         tagged.sort(key=lambda x: (abs(x[1] - entry_price) / max(entry_price, 1e-12), -x[2]))
     else:
         tagged.sort(key=lambda x: -x[2])
-    return tagged[0][0]
+    return tagged[0]
+
+
+def _strategy_from_entry_orders(
+    orders: list[dict],
+    *,
+    side: str,
+    entry_price: float = 0.0,
+) -> str:
+    name, _, _ = _best_entry_order(orders, side=side, entry_price=entry_price)
+    return name
 
 
 def attach_strategy_to_positions(
@@ -222,18 +256,30 @@ def attach_strategy_to_positions(
                 bot_sym[sym] = str(n)
 
     names: list[str] = []
+    open_times: list[str] = []
+    entry_prices: list[float | None] = []
     for _, row in out.iterrows():
         sym = str(row["symbol"]).upper()
+        ep = _float(row.get("entry_price"))
         orders = orders_by_symbol.get(sym, [])
-        name = _strategy_from_entry_orders(
+        name, order_ep, t_ms = _best_entry_order(
             orders,
             side=str(row["side"]),
-            entry_price=_float(row.get("entry_price")),
+            entry_price=ep,
         )
         if not name:
             name = bot_sym.get(sym, "")
+        open_ts = _ms_to_iso(t_ms) if t_ms else ""
+        if not open_ts and not bot_orders.empty and "created_at" in bot_orders.columns:
+            matches = bot_orders[bot_orders["symbol"].astype(str).str.upper() == sym]
+            if not matches.empty:
+                open_ts = str(matches["created_at"].iloc[-1])
         names.append(name)
+        open_times.append(open_ts)
+        entry_prices.append(order_ep if order_ep > 0 else (ep if ep > 0 else None))
     out["strategy_name"] = names
+    out["open_time"] = open_times
+    out["entry_price"] = entry_prices
     return out
 
 
@@ -344,6 +390,8 @@ def _strategy_stats_from_positions(positions: pd.DataFrame) -> pd.DataFrame:
                 "win_rate": None,
                 "profit_factor": None,
                 "avg_price": _float(row.get("entry_price"), 0) or None,
+                "entry_price": _float(row.get("entry_price"), 0) or None,
+                "open_time": row.get("open_time", ""),
                 "realized_pnl": 0.0,
             }
         )
@@ -398,6 +446,8 @@ def complete_all_strategy_rows(stats: pd.DataFrame) -> pd.DataFrame:
                 "win_rate": None,
                 "profit_factor": None,
                 "avg_price": None,
+                "entry_price": None,
+                "open_time": "",
                 "realized_pnl": 0.0,
             }
         )
@@ -431,6 +481,21 @@ def strategy_performance_table(trades: pd.DataFrame) -> pd.DataFrame:
             total_qty = qty.sum()
             avg_price = float((grp["price"].astype(float) * qty).sum() / total_qty) if total_qty > 0 else None
 
+        opens = (
+            grp[grp["realized_pnl"].astype(float) == 0]
+            if "realized_pnl" in grp.columns
+            else grp
+        )
+        ref = opens if not opens.empty else grp
+        open_time = ""
+        if "time" in ref.columns and not ref.empty:
+            open_time = str(ref["time"].min())
+        entry_price = None
+        if "avg_price" in ref.columns and not ref.empty:
+            entry_price = float(ref.iloc[0]["avg_price"])
+        if entry_price is None:
+            entry_price = avg_price
+
         rows.append(
             {
                 "strategy_name": strategy,
@@ -441,6 +506,8 @@ def strategy_performance_table(trades: pd.DataFrame) -> pd.DataFrame:
                 "win_rate": wr,
                 "profit_factor": pf,
                 "avg_price": avg_price,
+                "entry_price": entry_price,
+                "open_time": open_time,
                 "realized_pnl": float(closed["realized_pnl"].sum()) if not closed.empty else 0.0,
             }
         )
@@ -773,6 +840,7 @@ def fetch_futures_account(
     try:
         open_orders = _open_orders_df(_fetch_all_open_orders(client, symbols))
         open_orders = attach_leverage_to_orders(open_orders, positions, bot_orders)
+        open_orders = attach_entry_meta_to_orders(open_orders, positions)
     except Exception as e:
         warnings.append(f"掛單讀取失敗: {_format_api_error(e)}")
         open_orders = pd.DataFrame()
@@ -899,6 +967,9 @@ def fetch_paper_account(*, account_id: str = "account1", limit: int = 500) -> Ac
             strat = named.iloc[-1] if len(named) else ""
         if not strat and "strategy_id" in grp.columns:
             strat = _strategy_name(str(grp["strategy_id"].iloc[-1]))
+        open_time = ""
+        if "created_at" in grp.columns:
+            open_time = str(grp["created_at"].min())
         pos_records.append(
             {
                 "symbol": symbol,
@@ -909,6 +980,7 @@ def fetch_paper_account(*, account_id: str = "account1", limit: int = 500) -> Ac
                 "unrealized_pnl": 0.0,
                 "leverage": int(round(lev)),
                 "strategy_name": strat,
+                "open_time": open_time,
                 "margin_type": grp["margin_type"].iloc[0] if "margin_type" in grp.columns else "cross",
                 "liquidation_price": 0.0,
             }
@@ -920,6 +992,8 @@ def fetch_paper_account(*, account_id: str = "account1", limit: int = 500) -> Ac
         stop = _float(row.get("stop"), 0)
         tp = _float(row.get("take_profit"), 0)
         lev = int(_float(row.get("leverage"), 1))
+        entry_px = _float(row.get("entry"))
+        open_ts = row.get("created_at", "")
         if stop > 0:
             order_records.append(
                 {
@@ -933,7 +1007,9 @@ def fetch_paper_account(*, account_id: str = "account1", limit: int = 500) -> Ac
                     "reduce_only": True,
                     "status": "NEW",
                     "order_id": "",
-                    "time": row.get("created_at", ""),
+                    "time": open_ts,
+                    "open_time": open_ts,
+                    "entry_price": entry_px,
                     "leverage": lev,
                 }
             )
@@ -950,7 +1026,9 @@ def fetch_paper_account(*, account_id: str = "account1", limit: int = 500) -> Ac
                     "reduce_only": True,
                     "status": "NEW",
                     "order_id": "",
-                    "time": row.get("created_at", ""),
+                    "time": open_ts,
+                    "open_time": open_ts,
+                    "entry_price": entry_px,
                     "leverage": lev,
                 }
             )

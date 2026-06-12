@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from core.env_bootstrap import credential_status, is_managed_deploy, load_project_env
@@ -1151,6 +1151,97 @@ def _account_live_metrics_fragment() -> None:
     _render_account_metrics(profile_id, stats, headline=headline, live=True)
 
 
+def _strategy_name_to_timeframe() -> dict[str, str]:
+    return {meta.name: meta.timeframe for meta in STRATEGIES.values()}
+
+
+def _resolve_account_date_range(
+    preset: str,
+    custom_range: tuple[date, date] | date | None,
+) -> tuple[datetime | None, datetime | None]:
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    if preset == "全部":
+        return None, None
+    if preset == "今天":
+        start = datetime.combine(today, time.min, tzinfo=timezone.utc)
+        return start, now
+    if preset == "近 7 天":
+        start_day = today - timedelta(days=6)
+        start = datetime.combine(start_day, time.min, tzinfo=timezone.utc)
+        return start, now
+    if preset == "近 30 天":
+        start_day = today - timedelta(days=29)
+        start = datetime.combine(start_day, time.min, tzinfo=timezone.utc)
+        return start, now
+    if preset == "自訂" and custom_range:
+        if isinstance(custom_range, tuple) and len(custom_range) == 2:
+            d0, d1 = custom_range
+        else:
+            d0 = d1 = custom_range  # type: ignore[assignment]
+        start = datetime.combine(d0, time.min, tzinfo=timezone.utc)
+        end = datetime.combine(d1, time.max, tzinfo=timezone.utc)
+        return start, end
+    return None, None
+
+
+def _filter_account_dataframe(
+    df: pd.DataFrame,
+    *,
+    date_col: str | None,
+    date_start: datetime | None,
+    date_end: datetime | None,
+    timeframe: str,
+    strategy_col: str = "strategy_name",
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if date_col and date_col in out.columns and (date_start or date_end):
+        ts = pd.to_datetime(out[date_col], utc=True, errors="coerce")
+        mask = ts.notna()
+        if date_start is not None:
+            mask &= ts >= pd.Timestamp(date_start)
+        if date_end is not None:
+            mask &= ts <= pd.Timestamp(date_end)
+        out = out.loc[mask]
+    if timeframe != "全部週期" and strategy_col in out.columns:
+        tf_map = _strategy_name_to_timeframe()
+        out = out[out[strategy_col].astype(str).map(lambda n: tf_map.get(n, "")) == timeframe]
+    return out.reset_index(drop=True)
+
+
+def _render_account_filters(profile_id: str) -> tuple[datetime | None, datetime | None, str]:
+    tf_options = ["全部週期"] + sorted(
+        {meta.timeframe for meta in STRATEGIES.values()},
+        key=lambda x: (len(x), x),
+    )
+    c1, c2, c3 = st.columns([1.2, 1.8, 1])
+    with c1:
+        preset = st.selectbox(
+            "開倉日期區間",
+            ["全部", "今天", "近 7 天", "近 30 天", "自訂"],
+            key=f"acct_date_preset_{profile_id}",
+        )
+    custom_range = None
+    with c2:
+        if preset == "自訂":
+            custom_range = st.date_input(
+                "自訂日期",
+                value=(date.today() - timedelta(days=7), date.today()),
+                key=f"acct_date_custom_{profile_id}",
+            )
+    with c3:
+        tf_filter = st.selectbox(
+            "K 線週期",
+            tf_options,
+            key=f"acct_tf_filter_{profile_id}",
+            help="依策略預設週期篩選（EMA / Hunting Funding 等）",
+        )
+    date_start, date_end = _resolve_account_date_range(preset, custom_range)
+    return date_start, date_end, tf_filter
+
+
 def _display_account_table(df: pd.DataFrame, empty_msg: str, height: int = 280) -> None:
     if df is None or df.empty:
         st.info(empty_msg)
@@ -1205,9 +1296,28 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         if mode == ExecMode.PAPER:
             st.caption("本地模擬：頂部為模擬資金；開啟即時更新需搭配行情（目前為靜態）。")
 
+    st.markdown("##### 篩選")
+    date_start, date_end, tf_filter = _render_account_filters(profile_id)
+    if date_start or date_end or tf_filter != "全部週期":
+        parts: list[str] = []
+        if date_start or date_end:
+            parts.append(
+                f"日期：{date_start.strftime('%Y-%m-%d') if date_start else '…'}"
+                f" ~ {date_end.strftime('%Y-%m-%d %H:%M UTC') if date_end else '…'}"
+            )
+        if tf_filter != "全部週期":
+            parts.append(f"週期：{tf_filter}")
+        st.caption("　".join(parts))
+
     st.markdown("##### 策略績效")
     st.caption("列出全部策略；尚無成交者顯示 0 筆（—）")
-    stats = view.strategy_stats.copy()
+    stats = _filter_account_dataframe(
+        view.strategy_stats.copy(),
+        date_col="open_time",
+        date_start=date_start,
+        date_end=date_end,
+        timeframe=tf_filter,
+    )
     if not stats.empty:
         show_stats = stats.copy()
         if "leverage" in show_stats.columns:
@@ -1220,6 +1330,8 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             "strategy_name": "策略",
             "symbol": "交易對",
             "side": "方向",
+            "open_time": "開單時間",
+            "entry_price": "進場價",
             "leverage": "槓桿",
             "trade_count": "成交筆數",
             "win_rate": "勝率",
@@ -1230,10 +1342,16 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         show_stats = show_stats.rename(columns={k: v for k, v in rename.items() if k in show_stats.columns})
         _display_account_table(show_stats, "尚無策略績效", height=220)
     else:
-        st.info("尚無策略績效（需有成交紀錄）")
+        st.info("尚無策略績效（需有成交紀錄，或調整篩選條件）")
 
     st.markdown("##### 持倉")
-    pos = view.positions.copy()
+    pos = _filter_account_dataframe(
+        view.positions.copy(),
+        date_col="open_time",
+        date_start=date_start,
+        date_end=date_end,
+        timeframe=tf_filter,
+    )
     if not pos.empty and "strategy_name" in pos.columns:
         pos["strategy_name"] = pos["strategy_name"].replace("", "未知")
     if not pos.empty and "leverage" in pos.columns:
@@ -1242,6 +1360,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         "symbol": "交易對",
         "strategy_name": "策略",
         "side": "方向",
+        "open_time": "開單時間",
         "size": "數量",
         "entry_price": "進場價",
         "mark_price": "標記價",
@@ -1251,16 +1370,23 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         "liquidation_price": "強平價",
     }
     pos = pos.rename(columns={k: v for k, v in pos_rename.items() if k in pos.columns})
-    _display_account_table(pos, "目前無持倉")
+    _display_account_table(pos, "目前無持倉（或篩選後無資料）")
 
     st.markdown("##### 掛單（止損 / 止盈）")
-    orders = view.open_orders.copy()
+    orders = _filter_account_dataframe(
+        view.open_orders.copy(),
+        date_col="open_time",
+        date_start=date_start,
+        date_end=date_end,
+        timeframe=tf_filter,
+    )
     if not orders.empty and "leverage" in orders.columns:
         orders["leverage"] = orders["leverage"].apply(_fmt_leverage)
     ord_rename = {
         "symbol": "交易對",
         "type": "類型",
         "side": "方向",
+        "entry_price": "進場價",
         "price": "價格",
         "stop_price": "觸發價",
         "quantity": "數量",
@@ -1268,14 +1394,21 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         "reduce_only": "僅減倉",
         "status": "狀態",
         "order_id": "訂單ID",
-        "time": "時間",
+        "open_time": "開單時間",
+        "time": "掛單時間",
         "leverage": "槓桿",
     }
     orders = orders.rename(columns={k: v for k, v in ord_rename.items() if k in orders.columns})
-    _display_account_table(orders, "目前無掛單")
+    _display_account_table(orders, "目前無掛單（或篩選後無資料）")
 
     st.markdown("##### 成交明細")
-    trades = view.trades.copy()
+    trades = _filter_account_dataframe(
+        view.trades.copy(),
+        date_col="time",
+        date_start=date_start,
+        date_end=date_end,
+        timeframe=tf_filter,
+    )
     if not trades.empty:
         if "leverage" in trades.columns:
             trades["leverage"] = trades["leverage"].apply(_fmt_leverage)
@@ -1295,7 +1428,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             "trade_count": "成交次數",
         }
         trades = trades.rename(columns={k: v for k, v in tr_rename.items() if k in trades.columns})
-    _display_account_table(trades, "尚無成交紀錄", height=360)
+    _display_account_table(trades, "尚無成交紀錄（或篩選後無資料）", height=360)
 
     st.markdown("##### 損益紀錄")
     income = view.income.copy()
