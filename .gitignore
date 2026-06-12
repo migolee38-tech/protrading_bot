@@ -12,3 +12,4 @@ logs/
 hunting_funding.log
 data/live_trader_state.json
 data/live_trader_state/
+data/stats_reset/

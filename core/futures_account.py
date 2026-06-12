@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pandas as pd
@@ -51,6 +51,7 @@ class AccountView:
     account_label: str = ""
     error: str | None = None
     warnings: list[str] = field(default_factory=list)
+    stats_reset_at: str | None = None
 
 
 def _float(val: Any, default: float = 0.0) -> float:
@@ -768,11 +769,46 @@ def fetch_live_headline_for_profile(profile: AccountProfile) -> AccountHeadline:
         return empty
 
 
+def apply_stats_reset(view: AccountView, profile: AccountProfile) -> AccountView:
+    """
+    依統計歸零點過濾成交／損益，重算勝率與獲利因子。
+    持倉、掛單、錢包餘額不受影響。
+    """
+    from core.stats_reset import filter_dataframe_after_reset, get_stats_reset_at, get_stats_reset_label
+
+    reset_at = get_stats_reset_at(profile)
+    if reset_at is None:
+        return view
+
+    trades = filter_dataframe_after_reset(view.trades, "time", reset_at)
+    income = filter_dataframe_after_reset(view.income, "time", reset_at)
+    income_sum = summarize_income(income)
+    win_rate, pf = compute_trade_stats(trades)
+    strategy_stats = merge_strategy_performance(trades, view.positions)
+
+    return replace(
+        view,
+        trades=trades,
+        income=income,
+        win_rate=win_rate,
+        profit_factor=pf,
+        realized_pnl=income_sum["realized_pnl"],
+        commission=income_sum["commission"],
+        funding=income_sum["funding"],
+        strategy_stats=strategy_stats,
+        stats_reset_at=get_stats_reset_label(profile),
+    )
+
+
 def fetch_account(profile: AccountProfile, **kwargs: Any) -> AccountView:
     """依 profile 拉取帳戶（paper / testnet / live）。"""
     if profile.network == ExecMode.PAPER:
-        return fetch_paper_account(account_id=profile.account_id, **kwargs)
-    return fetch_futures_account(profile.network, account_id=profile.account_id, **kwargs)
+        view = fetch_paper_account(account_id=profile.account_id, **kwargs)
+    else:
+        view = fetch_futures_account(
+            profile.network, account_id=profile.account_id, **kwargs
+        )
+    return apply_stats_reset(view, profile)
 
 
 def fetch_futures_account(

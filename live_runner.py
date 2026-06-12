@@ -22,8 +22,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.env_bootstrap import load_project_env
+from core.trade_data_store import maybe_clear_from_env
 
 load_project_env()
+_cleared = maybe_clear_from_env()
 
 from core.account_profiles import (
     AccountProfile,
@@ -302,6 +304,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     _setup_logging()
+    if _cleared:
+        log.info("CLEAR_TRADE_DATA：已清空本地訂單／state → %s", ", ".join(_cleared))
 
     profiles = _resolve_profiles(args)
     has_live = any(p.network == ExecMode.LIVE for p in profiles)

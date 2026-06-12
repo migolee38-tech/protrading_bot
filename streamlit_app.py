@@ -16,8 +16,10 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from core.env_bootstrap import credential_status, is_managed_deploy, load_project_env
+from core.trade_data_store import clear_local_trade_data, maybe_clear_from_env
 
 load_project_env()
+_startup_cleared = maybe_clear_from_env()
 
 # Streamlit Cloud（Linux）預設 locale 有時非 UTF-8，避免中文讀寫異常
 os.environ.setdefault("LANG", "C.UTF-8")
@@ -55,6 +57,7 @@ from core.futures_account import (
     fetch_account,
     fetch_live_headline_for_profile,
 )
+from core.stats_reset import clear_stats_reset, set_stats_reset_now
 from core.order_executor import (
     OrderMode,
     OrderRequest,
@@ -245,9 +248,31 @@ def _strategy_order_hints(
     }
 
 
+def _sidebar_clear_trade_data() -> None:
+    if _startup_cleared:
+        st.sidebar.success(
+            f"啟動時已清空本地成交紀錄（{len(_startup_cleared)} 個檔案）。"
+            "請移除 CLEAR_TRADE_DATA 環境變數以免下次重啟再清。"
+        )
+    with st.sidebar.expander("維護", expanded=bool(_startup_cleared)):
+        st.caption(
+            "清空 bot 本地 JSON（訂單／防重複 state）。"
+            "若要歸零勝率但**保留持倉**，請到帳戶 tab 按 **重新統計**。"
+        )
+        if st.button("清空本地成交紀錄", key="clear_local_trade_data", use_container_width=True):
+            removed = clear_local_trade_data()
+            _cached_account_view.clear()
+            if removed:
+                st.success(f"已刪除 {len(removed)} 個檔案")
+            else:
+                st.info("沒有可清空的檔案")
+            st.rerun()
+
+
 def _sidebar_panel(market: MarketType) -> tuple[int, int, pd.DataFrame]:
     """側欄由上而下：Top 100 表 → 成交量滑桿 → K 線根數滑桿。"""
     render_logout_control()
+    _sidebar_clear_trade_data()
     st.sidebar.markdown("### 📊 Top 100")
 
     top_n_cur = int(st.session_state.get("sidebar_top_n", 100))
@@ -1025,6 +1050,7 @@ def _account_view_to_dict(view: AccountView) -> dict:
         "income": view.income,
         "strategy_stats": view.strategy_stats,
         "warnings": view.warnings,
+        "stats_reset_at": view.stats_reset_at,
     }
 
 
@@ -1052,6 +1078,7 @@ def _load_account_view(profile_id: str) -> AccountView:
         account_label=data.get("account_label", ""),
         error=data["error"],
         warnings=data.get("warnings") or [],
+        stats_reset_at=data.get("stats_reset_at"),
     )
 
 
@@ -1260,9 +1287,18 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         st.warning(credentials_hint(mode, account_id))
         return
 
-    col_refresh, col_live, _ = st.columns([1, 2, 4])
+    col_refresh, col_reset_stats, col_live, _ = st.columns([1, 1.2, 2, 3])
     with col_refresh:
         if st.button("重新整理", key=f"refresh_account_{profile_id}"):
+            _cached_account_view.clear()
+            st.rerun()
+    with col_reset_stats:
+        if st.button(
+            "重新統計",
+            key=f"reset_stats_{profile_id}",
+            help="隱藏此刻之前的成交與績效，勝率／獲利因子歸零；目前持倉保留",
+        ):
+            set_stats_reset_now(profile)
             _cached_account_view.clear()
             st.rerun()
     with col_live:
@@ -1287,6 +1323,24 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
 
     for warn in view.warnings:
         st.warning(warn)
+
+    if view.stats_reset_at:
+        rs_col, rs_btn = st.columns([4, 1])
+        with rs_col:
+            st.info(
+                f"📊 績效自 **{view.stats_reset_at}** 起算；"
+                "較早成交已隱藏，**持倉不受影響**。"
+                "（Binance 歷史仍在交易所，僅網站不計入統計）"
+            )
+        with rs_btn:
+            if st.button("恢復全部歷史", key=f"clear_stats_reset_{profile_id}"):
+                clear_stats_reset(profile)
+                _cached_account_view.clear()
+                st.rerun()
+    elif mode != ExecMode.PAPER:
+        st.caption(
+            "若要忽略今日稍早的模擬倉成交、讓勝率／獲利因子重新計算，請按 **重新統計**（持倉保留）。"
+        )
 
     if live_on and mode != ExecMode.PAPER:
         st.session_state["_account_live_profile_id"] = profile_id
