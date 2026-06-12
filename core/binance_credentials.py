@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from enum import Enum
-from pathlib import Path
 
-from dotenv import load_dotenv
+from core.env_bootstrap import load_project_env
 
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_ENV_PATH, override=True)
+load_project_env()
 
 
 class ExecMode(str, Enum):

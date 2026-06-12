@@ -15,9 +15,9 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
+from core.env_bootstrap import credential_status, is_managed_deploy, load_project_env
 
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_project_env()
 
 # Streamlit Cloud（Linux）預設 locale 有時非 UTF-8，避免中文讀寫異常
 os.environ.setdefault("LANG", "C.UTF-8")
@@ -39,7 +39,15 @@ from core.lightweight_tv import (
     markers_for_strategies,
 )
 from core.market_data import MarketType, fetch_klines, fetch_symbol_last_price, pop_source_note
-from core.account_profiles import account_label, list_account_ids, load_profile, profile_from_id
+from core.account_profiles import (
+    AccountProfile,
+    account_label,
+    credential_env_names,
+    credentials_for_profile,
+    list_account_ids,
+    load_profile,
+    profile_from_id,
+)
 from core.binance_credentials import ExecMode, credentials_configured, credentials_hint, mode_label
 from core.futures_account import (
     AccountHeadline,
@@ -1047,6 +1055,29 @@ def _load_account_view(profile_id: str) -> AccountView:
     )
 
 
+def _render_credential_diagnostics(profile: AccountProfile) -> None:
+    """金鑰讀取診斷（不顯示金鑰內容）。"""
+    key_env, secret_env = credential_env_names(profile)
+    k_stat = credential_status(key_env)
+    s_stat = credential_status(secret_env)
+    k_loaded, s_loaded = credentials_for_profile(profile)
+    lines = [
+        f"- `{key_env}`：環境變數={'有' if k_stat['configured'] else '無'}"
+        f"（len={k_stat['length']}）→ 實際載入={'成功' if k_loaded else '失敗'}",
+        f"- `{secret_env}`：環境變數={'有' if s_stat['configured'] else '無'}"
+        f"（len={s_stat['length']}）→ 實際載入={'成功' if s_loaded else '失敗'}",
+    ]
+    if is_managed_deploy():
+        lines.append(
+            "- 雲端部署：請確認變數設在 **此 Streamlit 服務**（非僅 runner 服務），"
+            "Save 後 **Redeploy**，值勿加引號。"
+        )
+    if k_loaded and s_loaded and k_stat["length"] < 20:
+        lines.append("- ⚠️ API Key 長度異常偏短，請檢查是否貼錯或截斷。")
+    with st.expander("金鑰讀取診斷（不含密鑰內容）", expanded=True):
+        st.markdown("\n".join(lines))
+
+
 def _account_selector(mode: ExecMode, *, key_suffix: str) -> str:
     ids = list_account_ids()
     labels = {aid: account_label(aid) for aid in ids}
@@ -1155,6 +1186,12 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
     view = _load_account_view(profile_id)
     if view.error:
         st.error(view.error)
+        if mode != ExecMode.PAPER:
+            _render_credential_diagnostics(profile)
+            st.caption(
+                "若環境變數顯示「有」但仍 API 失敗：多為 **Testnet 金鑰貼成主網**、"
+                "Key/Secret 貼反、或 Testnet API 未開啟合約讀取權限／IP 白名單未含 Zeabur 出口 IP。"
+            )
         return
 
     for warn in view.warnings:
@@ -1290,8 +1327,7 @@ def main() -> None:
         st.stop()
     _init_state()
     if not auth_is_enabled():
-        on_zeabur = bool(os.environ.get("ZEABUR") or os.environ.get("ZEABUR_ENV_ID"))
-        if on_zeabur:
+        if is_managed_deploy():
             st.sidebar.error(
                 "Zeabur 未讀到 `APP_LOGIN_PASSWORD`。"
                 "請在**此服務** Variables 新增 Key 為 `APP_LOGIN_PASSWORD`（全大寫、底線），"

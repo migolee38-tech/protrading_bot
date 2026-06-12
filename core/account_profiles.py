@@ -6,12 +6,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 from core.binance_credentials import ExecMode, mode_label
+from core.env_bootstrap import env_value, load_project_env, normalize_credential
 
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_ENV_PATH, override=True)
+load_project_env()
 
 _DEFAULT_LABELS = {"account1": "帳戶 1", "account2": "帳戶 2"}
 
@@ -21,6 +19,20 @@ _LEGACY_KEY_MAP: dict[tuple[str, ExecMode], tuple[str, str]] = {
         "BINANCE_TESTNET_API_KEY",
         "BINANCE_TESTNET_API_SECRET",
     ),
+    ("account2", ExecMode.LIVE): (
+        "BINANCE_ACCOUNT2_API_KEY",
+        "BINANCE_ACCOUNT2_API_SECRET",
+    ),
+}
+
+# 常見誤設的變數名（依序嘗試，僅補主欄位為空時）
+_CREDENTIAL_ALIASES: dict[tuple[str, ExecMode], list[tuple[str, str]]] = {
+    ("account2", ExecMode.TESTNET): [
+        ("BINANCE_ACCOUNT2_TESTNET_KEY", "BINANCE_ACCOUNT2_TESTNET_SECRET"),
+    ],
+    ("account2", ExecMode.LIVE): [
+        ("BINANCE_ACCOUNT2_LIVE_API_KEY", "BINANCE_ACCOUNT2_LIVE_API_SECRET"),
+    ],
 }
 
 
@@ -44,10 +56,22 @@ def _from_streamlit_secrets(key: str) -> str:
         import streamlit as st
 
         if hasattr(st, "secrets") and key in st.secrets:
-            return str(st.secrets[key]).strip()
+            return normalize_credential(str(st.secrets[key]))
     except Exception:
         pass
     return ""
+
+
+def _first_env(*keys: str) -> str:
+    for k in keys:
+        val = env_value(k)
+        if val:
+            return val
+    return ""
+
+
+def credential_env_names(profile: AccountProfile) -> tuple[str, str]:
+    return _env_credential_keys(profile.account_id, profile.network)
 
 
 def list_account_ids() -> list[str]:
@@ -96,29 +120,31 @@ def credentials_for_profile(profile: AccountProfile) -> tuple[str, str]:
         return "", ""
 
     key_env, secret_env = _env_credential_keys(profile.account_id, profile.network)
-    api_key = os.getenv(key_env, "").strip()
-    api_secret = os.getenv(secret_env, "").strip()
-    api_key = api_key or _from_streamlit_secrets(key_env)
-    api_secret = api_secret or _from_streamlit_secrets(secret_env)
+    api_key = _first_env(key_env) or _from_streamlit_secrets(key_env)
+    api_secret = _first_env(secret_env) or _from_streamlit_secrets(secret_env)
+
+    for ak, sk in _CREDENTIAL_ALIASES.get(
+        (profile.account_id, profile.network), []
+    ):
+        api_key = api_key or _first_env(ak) or _from_streamlit_secrets(ak)
+        api_secret = api_secret or _first_env(sk) or _from_streamlit_secrets(sk)
 
     legacy = _LEGACY_KEY_MAP.get((profile.account_id, profile.network))
     if legacy:
         lk, ls = legacy
-        api_key = api_key or os.getenv(lk, "").strip()
-        api_secret = api_secret or os.getenv(ls, "").strip()
-        api_key = api_key or _from_streamlit_secrets(lk)
-        api_secret = api_secret or _from_streamlit_secrets(ls)
+        api_key = api_key or _first_env(lk) or _from_streamlit_secrets(lk)
+        api_secret = api_secret or _first_env(ls) or _from_streamlit_secrets(ls)
 
     if profile.network == ExecMode.TESTNET and profile.account_id == "account1":
         if not api_key or not api_secret:
-            api_key = api_key or os.getenv("BINANCE_API_KEY", "").strip()
-            api_secret = api_secret or os.getenv("BINANCE_API_SECRET", "").strip()
+            api_key = api_key or _first_env("BINANCE_API_KEY")
+            api_secret = api_secret or _first_env("BINANCE_API_SECRET")
 
     if profile.network == ExecMode.LIVE:
-        api_key = api_key or os.getenv("API_KEY", "").strip()
-        api_secret = api_secret or os.getenv("API_SECRET", "").strip()
-        api_key = api_key or _from_streamlit_secrets("API_KEY")
-        api_secret = api_secret or _from_streamlit_secrets("API_SECRET")
+        api_key = api_key or _first_env("API_KEY") or _from_streamlit_secrets("API_KEY")
+        api_secret = (
+            api_secret or _first_env("API_SECRET") or _from_streamlit_secrets("API_SECRET")
+        )
 
     return api_key, api_secret
 

@@ -21,9 +21,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
+from core.env_bootstrap import load_project_env
 
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_project_env()
 
 from core.account_profiles import (
     AccountProfile,

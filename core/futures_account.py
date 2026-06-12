@@ -792,14 +792,21 @@ def fetch_futures_account(
     symbol_strategy = _symbol_strategy_from_positions(positions)
 
     trade_rows: list[dict] = []
+    trade_failures = 0
     for sym in sorted(symbols):
         try:
             for r in client.get_account_trades(symbol=sym, limit=trade_limit_per_symbol):
                 row = dict(r)
                 row["symbol"] = sym
                 trade_rows.append(row)
-        except Exception:
-            continue
+        except Exception as e:
+            trade_failures += 1
+            if trade_failures <= 3:
+                warnings.append(f"{sym} 成交讀取失敗: {_format_api_error(e)}")
+    if not symbols:
+        warnings.append(
+            "無法判定交易對，成交明細為空（需有持倉、掛單或損益紀錄中的 symbol）。"
+        )
     trades = _aggregate_trades_by_order(trade_rows, order_cid_map)
     trades = attach_leverage_and_strategy_to_trades(
         trades,

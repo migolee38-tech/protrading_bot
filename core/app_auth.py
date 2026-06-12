@@ -3,22 +3,17 @@
 from __future__ import annotations
 
 import hmac
-import os
-from pathlib import Path
 
 import streamlit as st
-from dotenv import load_dotenv
+from core.env_bootstrap import env_value, load_project_env
 
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-# override=True：確保 .env 內的 APP_LOGIN_* 會覆蓋空的外部環境變數
-load_dotenv(_ENV_PATH, override=True)
+load_project_env()
 
 _SESSION_KEY = "_auth_ok"
 
 
 def _env(key: str, default: str = "") -> str:
-    val = os.environ.get(key, default)
-    return val.strip() if isinstance(val, str) else default
+    return env_value(key, default)
 
 
 def _secret_or_env(key: str, default: str = "") -> str:
