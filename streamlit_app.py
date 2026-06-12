@@ -39,13 +39,13 @@ from core.lightweight_tv import (
     markers_for_strategies,
 )
 from core.market_data import MarketType, fetch_klines, fetch_symbol_last_price, pop_source_note
+from core.account_profiles import account_label, list_account_ids, load_profile, profile_from_id
 from core.binance_credentials import ExecMode, credentials_configured, credentials_hint, mode_label
 from core.futures_account import (
     AccountHeadline,
     AccountView,
-    fetch_futures_account,
-    fetch_live_headline,
-    fetch_paper_account,
+    fetch_account,
+    fetch_live_headline_for_profile,
 )
 from core.order_executor import (
     OrderMode,
@@ -534,19 +534,25 @@ def _order_right_panel(
         horizontal=True,
         key="order_exec_mode",
     )
+    order_account_id = st.selectbox(
+        "下單帳戶",
+        list_account_ids(),
+        format_func=lambda x: account_label(x),
+        key="order_account_id",
+    )
 
     if exec_mode == "paper":
-        st.caption("本地模擬：寫入 data/paper_orders.json，不需 API。")
+        st.caption(f"本地模擬：寫入 data/orders/{order_account_id}_paper.json")
     elif exec_mode == "testnet":
-        if credentials_configured("testnet"):
-            st.caption("✅ Testnet 金鑰已設定（BINANCE_TESTNET_API_KEY）")
+        if credentials_configured("testnet", order_account_id):
+            st.caption(f"✅ {account_label(order_account_id)} Testnet 金鑰已設定")
         else:
-            st.warning(credentials_hint("testnet"))
+            st.warning(credentials_hint("testnet", order_account_id))
     else:
-        if credentials_configured("live"):
-            st.caption("⚠️ 主網實盤金鑰已設定（BINANCE_API_KEY）")
+        if credentials_configured("live", order_account_id):
+            st.caption(f"⚠️ {account_label(order_account_id)} 主網實盤金鑰已設定")
         else:
-            st.warning(credentials_hint("live"))
+            st.warning(credentials_hint("live", order_account_id))
 
     sid_pool = strategy_ids or [chart_highlight]
     sid = st.selectbox(
@@ -579,8 +585,10 @@ def _order_right_panel(
                 st.warning("主網實盤請先勾選風險確認")
             elif exec_mode in ("testnet", "live") and market != "futures":
                 st.warning("Testnet / 主網實盤目前僅支援永續市場")
-            elif exec_mode in ("testnet", "live") and not credentials_configured(exec_mode):
-                st.warning(credentials_hint(exec_mode))
+            elif exec_mode in ("testnet", "live") and not credentials_configured(
+                exec_mode, order_account_id
+            ):
+                st.warning(credentials_hint(exec_mode, order_account_id))
             elif not strategy_ids:
                 st.warning("請在頂部至少選一個策略")
             else:
@@ -593,6 +601,7 @@ def _order_right_panel(
                             mode=exec_mode,
                             market=market,
                             leverage=int(st.session_state.get("order_leverage", 10)),
+                            account_id=order_account_id,
                         )
                     except Exception as exc:
                         st.error(str(exc))
@@ -701,8 +710,10 @@ def _order_right_panel(
                 st.warning("主網實盤請先勾選風險確認")
             elif exec_mode in ("testnet", "live") and market != "futures":
                 st.warning("Testnet / 主網實盤目前僅支援永續市場")
-            elif exec_mode in ("testnet", "live") and not credentials_configured(exec_mode):
-                st.warning(credentials_hint(exec_mode))
+            elif exec_mode in ("testnet", "live") and not credentials_configured(
+                exec_mode, order_account_id
+            ):
+                st.warning(credentials_hint(exec_mode, order_account_id))
             elif price <= 0 or qty <= 0:
                 st.warning("請填寫有效價格與數量")
             elif stop_px <= 0:
@@ -718,6 +729,7 @@ def _order_right_panel(
                     stop=stop_px,
                     quantity=qty,
                     mode=OrderMode(exec_mode),
+                    account_id=order_account_id,
                     order_type=order_type,
                     price=price if order_type == "limit" else entry,
                     leverage=int(leverage),
@@ -977,20 +989,16 @@ def _fmt_pf(val: float | None) -> str:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _cached_futures_account(mode: str) -> dict:
-    view = fetch_futures_account(ExecMode(mode))
-    return _account_view_to_dict(view)
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def _cached_paper_account() -> dict:
-    view = fetch_paper_account()
+def _cached_account_view(profile_id: str) -> dict:
+    view = fetch_account(profile_from_id(profile_id))
     return _account_view_to_dict(view)
 
 
 def _account_view_to_dict(view: AccountView) -> dict:
     return {
         "mode": view.mode,
+        "account_id": view.account_id,
+        "account_label": view.account_label,
         "wallet_balance": view.wallet_balance,
         "available_balance": view.available_balance,
         "unrealized_pnl": view.unrealized_pnl,
@@ -1012,11 +1020,8 @@ def _account_view_to_dict(view: AccountView) -> dict:
     }
 
 
-def _load_account_view(mode: ExecMode) -> AccountView:
-    if mode == ExecMode.PAPER:
-        data = _cached_paper_account()
-    else:
-        data = _cached_futures_account(mode.value)
+def _load_account_view(profile_id: str) -> AccountView:
+    data = _cached_account_view(profile_id)
     return AccountView(
         mode=data["mode"],
         wallet_balance=data["wallet_balance"],
@@ -1035,13 +1040,27 @@ def _load_account_view(mode: ExecMode) -> AccountView:
         trades=data["trades"],
         income=data["income"],
         strategy_stats=data["strategy_stats"],
+        account_id=data.get("account_id", "account1"),
+        account_label=data.get("account_label", ""),
         error=data["error"],
         warnings=data.get("warnings") or [],
     )
 
 
+def _account_selector(mode: ExecMode, *, key_suffix: str) -> str:
+    ids = list_account_ids()
+    labels = {aid: account_label(aid) for aid in ids}
+    selected = st.selectbox(
+        "帳戶",
+        ids,
+        format_func=lambda x: labels.get(x, x),
+        key=f"account_select_{mode.value}_{key_suffix}",
+    )
+    return selected
+
+
 def _render_account_metrics(
-    mode: ExecMode,
+    profile_id: str,
     stats: AccountView,
     *,
     headline: AccountHeadline | None = None,
@@ -1055,7 +1074,7 @@ def _render_account_metrics(
     pos_n = headline.position_count if headline else stats.position_count
     ord_n = headline.open_order_count if headline else stats.open_order_count
 
-    prev_key = f"prev_upnl_{mode.value}"
+    prev_key = f"prev_upnl_{profile_id}"
     prev_upnl = st.session_state.get(prev_key)
     upnl_delta = None
     if live and prev_upnl is not None and abs(upnl - prev_upnl) >= 0.005:
@@ -1089,16 +1108,16 @@ def _render_account_metrics(
 @st.fragment(run_every=timedelta(seconds=10))
 def _account_live_metrics_fragment() -> None:
     """Fragment：僅重繪頂部指標，不打斷下方表格捲動位置。"""
-    mode_val = st.session_state.get("_account_live_mode")
-    if not mode_val:
+    profile_id = st.session_state.get("_account_live_profile_id")
+    if not profile_id:
         return
-    mode = ExecMode(mode_val)
-    headline = fetch_live_headline(mode)
+    profile = profile_from_id(profile_id)
+    headline = fetch_live_headline_for_profile(profile)
     if headline.error:
         st.error(headline.error)
         return
-    stats = _load_account_view(mode)
-    _render_account_metrics(mode, stats, headline=headline, live=True)
+    stats = _load_account_view(profile_id)
+    _render_account_metrics(profile_id, stats, headline=headline, live=True)
 
 
 def _display_account_table(df: pd.DataFrame, empty_msg: str, height: int = 280) -> None:
@@ -1110,30 +1129,30 @@ def _display_account_table(df: pd.DataFrame, empty_msg: str, height: int = 280) 
 
 def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
     st.subheader(title)
-    st.caption(caption)
+    account_id = _account_selector(mode, key_suffix="tab")
+    profile = load_profile(account_id, mode)
+    profile_id = profile.profile_id
+    st.caption(f"{caption}　·　目前：{profile.display_name}")
 
-    if mode != ExecMode.PAPER and not credentials_configured(mode):
-        st.warning(credentials_hint(mode))
+    if mode != ExecMode.PAPER and not credentials_configured(mode, account_id):
+        st.warning(credentials_hint(mode, account_id))
         return
 
     col_refresh, col_live, _ = st.columns([1, 2, 4])
     with col_refresh:
-        if st.button("重新整理", key=f"refresh_account_{mode.value}"):
-            if mode == ExecMode.PAPER:
-                _cached_paper_account.clear()
-            else:
-                _cached_futures_account.clear()
+        if st.button("重新整理", key=f"refresh_account_{profile_id}"):
+            _cached_account_view.clear()
             st.rerun()
     with col_live:
         live_default = mode != ExecMode.PAPER
         live_on = st.toggle(
             "即時更新頂部數據",
-            value=st.session_state.get(f"account_live_{mode.value}", live_default),
-            key=f"account_live_{mode.value}",
+            value=st.session_state.get(f"account_live_{profile_id}", live_default),
+            key=f"account_live_{profile_id}",
             help="每 10 秒向 Binance 拉取餘額與未實現損益（Testnet／實盤）",
         )
 
-    view = _load_account_view(mode)
+    view = _load_account_view(profile_id)
     if view.error:
         st.error(view.error)
         return
@@ -1142,10 +1161,10 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         st.warning(warn)
 
     if live_on and mode != ExecMode.PAPER:
-        st.session_state["_account_live_mode"] = mode.value
+        st.session_state["_account_live_profile_id"] = profile_id
         _account_live_metrics_fragment()
     else:
-        _render_account_metrics(mode, view, live=False)
+        _render_account_metrics(profile_id, view, live=False)
         if mode == ExecMode.PAPER:
             st.caption("本地模擬：頂部為模擬資金；開啟即時更新需搭配行情（目前為靜態）。")
 
@@ -1320,21 +1339,21 @@ def main() -> None:
         _render_account_tab(
             ExecMode.LIVE,
             title="實盤帳戶",
-            caption="資料來源：Binance 永續主網 API · 策略名稱對照本容器 data/paper_orders.json",
+            caption="Binance 永續主網 API · 策略對照 data/orders/{帳戶}_live.json",
         )
 
     with tab_testnet:
         _render_account_tab(
             ExecMode.TESTNET,
             title="Testnet 帳戶",
-            caption="資料來源：Binance Testnet 永續 API · 策略名稱對照本容器 data/paper_orders.json",
+            caption="Binance Testnet 永續 API · 策略對照 data/orders/{帳戶}_testnet.json",
         )
 
     with tab_paper:
         _render_account_tab(
             ExecMode.PAPER,
             title="本地模擬賬戶",
-            caption="資料來源：data/paper_orders.json（mode=paper）· 不需 API 金鑰",
+            caption="data/orders/{帳戶}_paper.json · 不需 API 金鑰",
         )
 
 

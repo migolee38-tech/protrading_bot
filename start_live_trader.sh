@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 多策略 24/7 自動交易 — paper / testnet / live
+# 多策略 24/7 自動交易 — 多帳戶單進程輪詢
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -9,7 +9,7 @@ if [[ ! -d .venv ]]; then
 fi
 
 source .venv/bin/activate
-mkdir -p logs data
+mkdir -p logs data/orders data/live_trader_state
 
 MODE="testnet"
 BG=false
@@ -24,11 +24,18 @@ for arg in "$@"; do
 done
 
 if [[ "$VERIFY" == true ]]; then
-  exec python live_runner.py --verify-only --exec "$MODE"
+  exec python live_runner.py --verify-only --profiles all
+fi
+
+PROFILE_SPEC="all"
+if [[ "$MODE" == "paper" ]]; then
+  PROFILE_SPEC="account1:paper,account2:paper"
+elif [[ "$MODE" == "testnet" ]]; then
+  PROFILE_SPEC="account1:paper,account1:testnet,account2:paper,account2:testnet"
 fi
 
 COMMON_ARGS=(
-  --exec "$MODE"
+  --profiles "$PROFILE_SPEC"
   --strategies all
   --top-n 100
   --scan-interval 30
@@ -38,14 +45,13 @@ COMMON_ARGS=(
 )
 
 if [[ "$MODE" == "live" ]]; then
-  COMMON_ARGS+=(--confirm-live)
-  echo "⚠️  主網實盤：使用 BINANCE_API_KEY 真實下單"
+  COMMON_ARGS=(--profiles all --strategies all --top-n 100 --scan-interval 30
+    --total-capital 1000 --position-pct 1 --leverage 10 --confirm-live)
+  echo "⚠️  主網實盤：--profiles all 含 live profile 時使用真實資金"
 fi
 
-if [[ "$MODE" != "paper" && ! -f .env ]]; then
-  echo "需要 .env："
-  echo "  testnet → BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET"
-  echo "  live    → BINANCE_API_KEY / BINANCE_API_SECRET"
+if [[ ! -f .env ]]; then
+  echo "需要 .env，請參考 .env.example 設定多帳戶金鑰"
   exit 1
 fi
 
@@ -55,12 +61,12 @@ if [[ "$BG" == true ]]; then
     echo "已在背景執行 (PID $(cat "$PID_FILE"))。停止: ./stop_live_trader.sh"
     exit 0
   fi
-  LOG="logs/live_${MODE}_$(date +%Y%m%d_%H%M%S).log"
+  LOG="logs/live_multi_$(date +%Y%m%d_%H%M%S).log"
   nohup python live_runner.py "${COMMON_ARGS[@]}" >> "$LOG" 2>&1 &
   echo $! > "$PID_FILE"
-  echo "✅ 多策略 ${MODE} 24/7  PID=$(cat "$PID_FILE")  日誌: tail -f $LOG"
+  echo "✅ 多帳戶多策略 24/7  PID=$(cat "$PID_FILE")  日誌: tail -f $LOG"
   exit 0
 fi
 
-echo "啟動多策略自動交易（${MODE}，前景）"
+echo "啟動多帳戶自動交易（--profiles all，前景）"
 exec python live_runner.py "${COMMON_ARGS[@]}"

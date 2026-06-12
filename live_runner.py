@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-多策略 24/7 自動交易 — paper / testnet / live
+多策略 24/7 自動交易 — 多帳戶單進程輪詢
 
 策略：EMA、唐奇安、RSI、MACD、Hunting Funding（預設全部啟用）
 
 用法：
-  python live_runner.py --verify-only --exec testnet
-  python live_runner.py --exec paper
-  python live_runner.py --exec testnet
-  python live_runner.py --exec live
+  python live_runner.py --verify-only --profiles all
+  python live_runner.py --profiles all
+  python live_runner.py --profiles account1:testnet,account2:testnet
+  python live_runner.py --exec testnet          # 向後相容：僅 account1
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,13 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
+from core.account_profiles import (
+    AccountProfile,
+    load_profile,
+    profile_configured,
+    runner_profiles,
+    state_file_for_profile,
+)
 from core.binance_credentials import ExecMode, mode_label
 from core.binance_futures import (
     FuturesSettings,
@@ -38,7 +46,6 @@ from core.strategy_registry import STRATEGIES, get_strategy, scan_signals_for, w
 from core.universe import top_usdt_pairs_by_volume
 
 _LOG_FILE = Path(__file__).resolve().parent / "logs" / "live_runner.log"
-_STATE_FILE = Path(__file__).resolve().parent / "data" / "live_trader_state.json"
 _ALL_STRATEGY_IDS = list(STRATEGIES.keys())
 
 log = logging.getLogger("LiveRunner")
@@ -58,28 +65,37 @@ def _setup_logging() -> None:
 
 
 @dataclass
-class RunnerConfig:
+class ProfileRunnerConfig:
+    profile: AccountProfile
     strategy_ids: list[str] = field(default_factory=lambda: list(_ALL_STRATEGY_IDS))
     top_n: int = 100
     market: MarketType = "futures"
     kline_limit: int = 800
+    futures: FuturesSettings | None = None
+
+    def __post_init__(self) -> None:
+        if self.futures is None:
+            self.futures = FuturesSettings.from_profile(self.profile)
+
+
+@dataclass
+class RunnerConfig:
+    profiles: list[ProfileRunnerConfig] = field(default_factory=list)
     scan_interval_sec: int = 30
-    exec_mode: ExecMode = ExecMode.TESTNET
-    futures: FuturesSettings = field(
-        default_factory=lambda: FuturesSettings.from_exec_mode(ExecMode.TESTNET)
-    )
 
 
-def _load_state() -> dict:
-    if not _STATE_FILE.exists():
+def _load_state(profile: AccountProfile) -> dict:
+    path = state_file_for_profile(profile)
+    if not path.exists():
         return {"executed": {}}
-    with open(_STATE_FILE, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def _save_state(state: dict) -> None:
-    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_STATE_FILE, "w", encoding="utf-8") as f:
+def _save_state(profile: AccountProfile, state: dict) -> None:
+    path = state_file_for_profile(profile)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
@@ -98,30 +114,32 @@ def _resolve_symbols(top_n: int) -> list[str]:
     return df["symbol"].tolist()
 
 
-def _filter_tradable_symbols(symbols: list[str], cfg: RunnerConfig) -> list[str]:
-    if cfg.exec_mode == ExecMode.PAPER:
+def _filter_tradable_symbols(symbols: list[str], cfg: ProfileRunnerConfig) -> list[str]:
+    if cfg.profile.network == ExecMode.PAPER:
         return symbols
+    assert cfg.futures is not None
     client = create_client(cfg.futures)
     tradable = get_tradable_symbols(client, testnet=cfg.futures.testnet)
     filtered = [s for s in symbols if s.replace("/", "").upper() in tradable]
     skipped = len(symbols) - len(filtered)
     if skipped:
         log.info(
-            f"略過 {skipped} 個在 {mode_label(cfg.exec_mode)} 不可交易的 symbol"
+            f"[{cfg.profile.display_name}] 略過 {skipped} 個不可交易的 symbol"
         )
     return filtered
 
 
-def _scan_round(cfg: RunnerConfig) -> list[dict]:
+def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
     symbols = _filter_tradable_symbols(_resolve_symbols(cfg.top_n), cfg)
     if not symbols:
-        log.warning("成交量榜單為空或無可交易 symbol，略過本輪。")
+        log.warning(f"[{cfg.profile.display_name}] 榜單為空，略過本輪。")
         return []
 
-    order_mode = OrderMode(cfg.exec_mode.value)
-    state = _load_state()
+    order_mode = OrderMode(cfg.profile.network.value)
+    state = _load_state(cfg.profile)
     executed: dict[str, str] = state.setdefault("executed", {})
     placed: list[dict] = []
+    assert cfg.futures is not None
 
     for sym in symbols:
         bin_sym = sym.replace("/", "").upper()
@@ -135,7 +153,7 @@ def _scan_round(cfg: RunnerConfig) -> list[dict]:
                     market=cfg.market,
                 )
             except Exception as e:
-                log.debug(f"{bin_sym} {sid} K線失敗: {e}")
+                log.debug(f"[{cfg.profile.profile_id}] {bin_sym} {sid} K線失敗: {e}")
                 continue
 
             prep = meta.prepare_df(with_symbol(raw, bin_sym, kline_limit=cfg.kline_limit))
@@ -167,6 +185,7 @@ def _scan_round(cfg: RunnerConfig) -> list[dict]:
                 stop=float(plan.stop),
                 quantity=qty,
                 mode=order_mode,
+                account_id=cfg.profile.account_id,
                 order_type="market",
                 price=float(plan.entry),
                 leverage=cfg.futures.leverage,
@@ -176,27 +195,43 @@ def _scan_round(cfg: RunnerConfig) -> list[dict]:
                 row = place_order(req, market=cfg.market)
                 placed.append(row)
                 executed[key] = row["created_at"]
-                log.info(f"[{order_mode.value}] {sid} {bin_sym} {last.side}")
+                log.info(f"[{cfg.profile.display_name}] {sid} {bin_sym} {last.side}")
             except Exception as e:
                 log.error(
-                    f"[{order_mode.value}] {sid} {bin_sym} 下單失敗: {format_binance_error(e)}"
+                    f"[{cfg.profile.display_name}] {sid} {bin_sym} 下單失敗: "
+                    f"{format_binance_error(e)}"
                 )
 
     if len(executed) > 5000:
         executed = dict(list(executed.items())[-3000:])
     state["executed"] = executed
-    _save_state(state)
+    _save_state(cfg.profile, state)
+    return placed
+
+
+def _scan_round(cfg: RunnerConfig) -> list[dict]:
+    placed: list[dict] = []
+    for pcfg in cfg.profiles:
+        placed.extend(_scan_round_for_profile(pcfg))
     return placed
 
 
 def run_loop(cfg: RunnerConfig) -> None:
-    if cfg.exec_mode != ExecMode.PAPER and not verify_connection(cfg.futures):
-        raise SystemExit(1)
+    for pcfg in cfg.profiles:
+        if pcfg.profile.network == ExecMode.PAPER:
+            continue
+        if not profile_configured(pcfg.profile):
+            log.error(f"[{pcfg.profile.display_name}] 缺少 API 金鑰，略過此 profile。")
+            continue
+        assert pcfg.futures is not None
+        if not verify_connection(pcfg.futures):
+            raise SystemExit(1)
 
-    names = ", ".join(get_strategy(s).name for s in cfg.strategy_ids)
+    names = ", ".join(get_strategy(s).name for s in cfg.profiles[0].strategy_ids)
+    profile_names = ", ".join(p.profile.display_name for p in cfg.profiles)
     log.info(
-        f"🚀 多策略自動交易啟動  [{mode_label(cfg.exec_mode)}]  "
-        f"Top {cfg.top_n} · 每 {cfg.scan_interval_sec}s 一輪"
+        f"🚀 多帳戶自動交易啟動  Profiles: {profile_names}  "
+        f"每 {cfg.scan_interval_sec}s 一輪"
     )
     log.info(f"策略：{names}")
 
@@ -213,15 +248,42 @@ def run_loop(cfg: RunnerConfig) -> None:
         time.sleep(cfg.scan_interval_sec)
 
 
+def _resolve_profiles(args: argparse.Namespace) -> list[AccountProfile]:
+    if args.profiles:
+        if args.profiles.lower() == "all":
+            return runner_profiles(include_live=args.confirm_live)
+        if args.profiles.lower() == "legacy":
+            return [load_profile("account1", args.exec)]
+        prev = os.environ.get("RUNNER_PROFILES")
+        os.environ["RUNNER_PROFILES"] = args.profiles
+        try:
+            return runner_profiles(include_live=args.confirm_live)
+        finally:
+            if prev is None:
+                os.environ.pop("RUNNER_PROFILES", None)
+            else:
+                os.environ["RUNNER_PROFILES"] = prev
+
+    if os.getenv("RUNNER_PROFILES"):
+        return runner_profiles(include_live=args.confirm_live)
+
+    return [load_profile("account1", args.exec)]
+
+
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="多策略 24/7 自動交易")
+    p = argparse.ArgumentParser(description="多策略 24/7 自動交易（多帳戶）")
     p.add_argument("--strategies", default="all", help="策略 ID，逗號分隔，或 all")
     p.add_argument("--top-n", type=int, default=100)
+    p.add_argument(
+        "--profiles",
+        default="",
+        help="帳戶 profile，逗號分隔 account_id:network，或 all（全部已設定帳戶）",
+    )
     p.add_argument(
         "--exec",
         choices=["paper", "testnet", "live"],
         default="testnet",
-        help="paper=本地模擬  testnet=模擬倉  live=主網實盤",
+        help="向後相容：未指定 --profiles 時僅跑 account1 此模式",
     )
     p.add_argument("--scan-interval", type=int, default=30)
     p.add_argument("--kline-limit", type=int, default=800)
@@ -232,7 +294,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--confirm-live",
         action="store_true",
-        help="live 模式必須加上此旗標以確認主網實盤風險",
+        help="profile 含 live 時必須加上此旗標",
     )
     return p.parse_args()
 
@@ -241,9 +303,10 @@ def main() -> None:
     args = parse_args()
     _setup_logging()
 
-    exec_mode = ExecMode(args.exec)
-    if exec_mode == ExecMode.LIVE and not args.confirm_live and not args.verify_only:
-        raise SystemExit("live 模式請加上 --confirm-live 以確認主網實盤風險")
+    profiles = _resolve_profiles(args)
+    has_live = any(p.network == ExecMode.LIVE for p in profiles)
+    if has_live and not args.confirm_live and not args.verify_only:
+        raise SystemExit("profile 含 live 請加上 --confirm-live 以確認主網實盤風險")
 
     if args.strategies.strip().lower() == "all":
         strategy_ids = list(_ALL_STRATEGY_IDS)
@@ -253,28 +316,45 @@ def main() -> None:
         if unknown:
             raise SystemExit(f"未知策略: {unknown}，可選: {_ALL_STRATEGY_IDS}")
 
-    futures = FuturesSettings.from_exec_mode(
-        exec_mode,
-        leverage=args.leverage,
-        total_capital=args.total_capital,
-        position_pct=args.position_pct,
-    )
+    profile_cfgs: list[ProfileRunnerConfig] = []
+    for profile in profiles:
+        profile_cfgs.append(
+            ProfileRunnerConfig(
+                profile=profile,
+                strategy_ids=strategy_ids,
+                top_n=args.top_n,
+                kline_limit=args.kline_limit,
+                futures=FuturesSettings.from_profile(
+                    profile,
+                    leverage=args.leverage,
+                    total_capital=args.total_capital,
+                    position_pct=args.position_pct,
+                ),
+            )
+        )
 
     if args.verify_only:
-        if exec_mode == ExecMode.PAPER:
-            log.info("paper 模式不需 API，設定正確。")
-            raise SystemExit(0)
-        ok = verify_connection(futures)
+        ok = True
+        for pcfg in profile_cfgs:
+            p = pcfg.profile
+            if p.network == ExecMode.PAPER:
+                log.info(f"✅ {p.display_name} — paper 不需 API")
+                continue
+            if not profile_configured(p):
+                log.error(f"❌ {p.display_name} — 缺少金鑰")
+                ok = False
+                continue
+            assert pcfg.futures is not None
+            if verify_connection(pcfg.futures):
+                log.info(f"✅ {p.display_name}")
+            else:
+                ok = False
         raise SystemExit(0 if ok else 1)
 
-    cfg = RunnerConfig(
-        strategy_ids=strategy_ids,
-        top_n=args.top_n,
-        kline_limit=args.kline_limit,
-        scan_interval_sec=args.scan_interval,
-        exec_mode=exec_mode,
-        futures=futures,
-    )
+    if not profile_cfgs:
+        raise SystemExit("沒有可執行的 profile；請設定 RUNNER_PROFILES 或 --profiles")
+
+    cfg = RunnerConfig(profiles=profile_cfgs, scan_interval_sec=args.scan_interval)
     run_loop(cfg)
 
 

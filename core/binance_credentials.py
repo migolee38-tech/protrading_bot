@@ -1,4 +1,4 @@
-"""依下單模式（paper / testnet / live）載入對應的 Binance API 金鑰。"""
+"""依下單模式（paper / testnet / live）與帳戶 ID 載入 Binance API 金鑰。"""
 
 from __future__ import annotations
 
@@ -18,12 +18,6 @@ class ExecMode(str, Enum):
     LIVE = "live"
 
 
-_MODE_KEYS: dict[ExecMode, tuple[str, str]] = {
-    ExecMode.TESTNET: ("BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_API_SECRET"),
-    ExecMode.LIVE: ("BINANCE_API_KEY", "BINANCE_API_SECRET"),
-}
-
-
 def mode_label(mode: ExecMode | str) -> str:
     labels = {
         ExecMode.PAPER: "本地模擬",
@@ -38,69 +32,35 @@ def mode_label(mode: ExecMode | str) -> str:
     return labels.get(mode, str(mode))
 
 
-def _from_streamlit_secrets(key: str) -> str:
-    try:
-        import streamlit as st
+def load_credentials(
+    mode: ExecMode | str,
+    account_id: str = "account1",
+) -> tuple[str, str]:
+    """依模式與帳戶回傳 (api_key, api_secret)。"""
+    from core.account_profiles import credentials_for_profile, load_profile
 
-        if hasattr(st, "secrets") and key in st.secrets:
-            return str(st.secrets[key]).strip()
-    except Exception:
-        pass
-    return ""
-
-
-def load_credentials(mode: ExecMode | str) -> tuple[str, str]:
-    """
-    依模式回傳 (api_key, api_secret)。
-    paper 回傳空字串；testnet / live 從對應環境變數讀取。
-    """
     if isinstance(mode, str):
         mode = ExecMode(mode)
-
-    if mode == ExecMode.PAPER:
-        return "", ""
-
-    key_env, secret_env = _MODE_KEYS[mode]
-    api_key = os.getenv(key_env, "").strip()
-    api_secret = os.getenv(secret_env, "").strip()
-
-    api_key = api_key or _from_streamlit_secrets(key_env)
-    api_secret = api_secret or _from_streamlit_secrets(secret_env)
-
-    # Testnet 相容舊設定：未設 TESTNET 專用變數時 fallback 至 BINANCE_API_KEY
-    if mode == ExecMode.TESTNET and (not api_key or not api_secret):
-        api_key = api_key or os.getenv("BINANCE_API_KEY", "").strip()
-        api_secret = api_secret or os.getenv("BINANCE_API_SECRET", "").strip()
-        api_key = api_key or _from_streamlit_secrets("BINANCE_API_KEY")
-        api_secret = api_secret or _from_streamlit_secrets("BINANCE_API_SECRET")
-
-    # 通用別名（僅 live；testnet 已在上方 fallback）
-    if mode == ExecMode.LIVE:
-        api_key = api_key or os.getenv("API_KEY", "").strip()
-        api_secret = api_secret or os.getenv("API_SECRET", "").strip()
-        api_key = api_key or _from_streamlit_secrets("API_KEY")
-        api_secret = api_secret or _from_streamlit_secrets("API_SECRET")
-
-    return api_key, api_secret
+    return credentials_for_profile(load_profile(account_id, mode))
 
 
-def credentials_configured(mode: ExecMode | str) -> bool:
+def credentials_configured(
+    mode: ExecMode | str,
+    account_id: str = "account1",
+) -> bool:
+    from core.account_profiles import load_profile, profile_configured
+
     if isinstance(mode, str):
         mode = ExecMode(mode)
-    if mode == ExecMode.PAPER:
-        return True
-    key, secret = load_credentials(mode)
-    return bool(key and secret)
+    return profile_configured(load_profile(account_id, mode))
 
 
-def credentials_hint(mode: ExecMode | str) -> str:
+def credentials_hint(
+    mode: ExecMode | str,
+    account_id: str = "account1",
+) -> str:
+    from core.account_profiles import credentials_hint_for_profile, load_profile
+
     if isinstance(mode, str):
         mode = ExecMode(mode)
-    if mode == ExecMode.PAPER:
-        return "本地模擬不需 API 金鑰。"
-    if mode == ExecMode.TESTNET:
-        return (
-            "請在 .env 設定 BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET"
-            "（https://testnet.binancefuture.com 申請）"
-        )
-    return "請在 .env 設定 BINANCE_API_KEY / BINANCE_API_SECRET（主網金鑰）。"
+    return credentials_hint_for_profile(load_profile(account_id, mode))

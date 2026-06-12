@@ -12,7 +12,14 @@ from typing import Any
 
 import pandas as pd
 
-from core.binance_credentials import ExecMode, credentials_configured, credentials_hint, mode_label
+from core.account_profiles import (
+    AccountProfile,
+    _LEGACY_ORDERS,
+    load_profile,
+    orders_file_for_profile,
+    profile_configured,
+)
+from core.binance_credentials import ExecMode, credentials_hint, mode_label
 from core.binance_futures import (
     BracketOrderError,
     FuturesSettings,
@@ -28,9 +35,6 @@ from core.market_data import MarketType, fetch_klines
 from core.strategy_registry import get_strategy, scan_signals_for, with_symbol
 
 log = logging.getLogger(__name__)
-
-_ORDERS_FILE = Path(__file__).resolve().parent.parent / "data" / "paper_orders.json"
-_ORDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
 class OrderMode(str, Enum):
@@ -52,6 +56,7 @@ class OrderRequest:
     stop: float
     quantity: float
     mode: OrderMode = OrderMode.PAPER
+    account_id: str = "account1"
     order_type: str = "market"
     price: float | None = None
     leverage: int = 10
@@ -73,6 +78,7 @@ class OrderRequest:
             "leverage": self.leverage,
             "margin_type": self.margin_type,
             "mode": self.mode.value,
+            "account_id": self.account_id,
             "created_at": self.created_at,
             "status": "pending",
         }
@@ -81,6 +87,10 @@ class OrderRequest:
         if self.take_profit is not None:
             row["take_profit"] = self.take_profit
         return row
+
+    @property
+    def profile(self) -> AccountProfile:
+        return load_profile(self.account_id, self.mode.value)
 
 
 def _optional_tp(value: float | None) -> float | None:
@@ -93,29 +103,60 @@ def _optional_tp(value: float | None) -> float | None:
     return v if v > 0 else None
 
 
-def _load_orders() -> list[dict]:
-    if not _ORDERS_FILE.exists():
+def _migrate_legacy_orders(profile: AccountProfile) -> list[dict]:
+    """將舊版 paper_orders.json 遷移至 account1 對應 profile。"""
+    if profile.account_id != "account1" or not _LEGACY_ORDERS.exists():
         return []
-    with open(_ORDERS_FILE, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(_LEGACY_ORDERS, encoding="utf-8") as f:
+            rows = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    mode_val = profile.network.value
+    out: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_mode = str(row.get("mode", "paper"))
+        row_acct = str(row.get("account_id", "account1")).lower()
+        if row_mode == mode_val and row_acct == profile.account_id:
+            out.append(row)
+    return out
 
 
-def _save_orders(orders: list[dict]) -> None:
-    with open(_ORDERS_FILE, "w", encoding="utf-8") as f:
+def _load_orders(profile: AccountProfile) -> list[dict]:
+    path = orders_file_for_profile(profile)
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+
+    legacy = _migrate_legacy_orders(profile)
+    if legacy:
+        _save_orders(profile, legacy)
+    return legacy
+
+
+def _save_orders(profile: AccountProfile, orders: list[dict]) -> None:
+    path = orders_file_for_profile(profile)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(orders, f, ensure_ascii=False, indent=2)
 
 
-def _append_order(row: dict) -> dict:
-    orders = _load_orders()
+def _append_order(profile: AccountProfile, row: dict) -> dict:
+    orders = _load_orders(profile)
     orders.append(row)
-    _save_orders(orders)
+    _save_orders(profile, orders)
     return row
 
 
 def place_paper_order(req: OrderRequest) -> dict:
     row = req.to_dict()
     row["status"] = "filled_paper"
-    return _append_order(row)
+    return _append_order(req.profile, row)
 
 
 def place_futures_order(req: OrderRequest) -> dict:
@@ -123,9 +164,10 @@ def place_futures_order(req: OrderRequest) -> dict:
     if req.mode not in (OrderMode.TESTNET, OrderMode.LIVE):
         raise ValueError("place_futures_order 僅支援 testnet / live")
 
-    settings = FuturesSettings.from_exec_mode(req.mode, leverage=req.leverage)
+    profile = req.profile
+    settings = FuturesSettings.from_profile(profile, leverage=req.leverage)
     if not settings.api_key or not settings.api_secret:
-        raise ValueError(credentials_hint(req.mode))
+        raise ValueError(credentials_hint(req.mode, req.account_id))
 
     client = create_client(settings)
     lev = resolve_leverage(client, req.symbol.replace("/", "").upper(), settings)
@@ -164,7 +206,7 @@ def place_futures_order(req: OrderRequest) -> dict:
         row["exchange_order_id"] = e.result.entry.get("orderId")
         row["client_order_id"] = e.result.entry.get("clientOrderId") or client_order_id
         row["error"] = str(e)
-        _append_order(row)
+        _append_order(profile, row)
         raise ValueError(str(e)) from e
 
     row = req.to_dict()
@@ -177,7 +219,7 @@ def place_futures_order(req: OrderRequest) -> dict:
         row["stop_algo_id"] = bracket.stop_algo.get("algoId")
     if bracket.take_profit_algo:
         row["take_profit_algo_id"] = bracket.take_profit_algo.get("algoId")
-    return _append_order(row)
+    return _append_order(profile, row)
 
 
 def place_spot_order(req: OrderRequest) -> dict:
@@ -199,7 +241,7 @@ def place_spot_order(req: OrderRequest) -> dict:
     row = req.to_dict()
     row["status"] = "filled_live"
     row["exchange_order_id"] = result.get("orderId")
-    return _append_order(row)
+    return _append_order(req.profile, row)
 
 
 def place_order(req: OrderRequest, *, market: MarketType = "futures") -> dict:
@@ -223,11 +265,22 @@ def place_live_order(req: OrderRequest) -> dict:
     return place_futures_order(req)
 
 
-def list_paper_orders(limit: int = 50) -> pd.DataFrame:
-    orders = _load_orders()
+def list_orders_for_profile(profile: AccountProfile, limit: int = 500) -> pd.DataFrame:
+    orders = _load_orders(profile)
     if not orders:
         return pd.DataFrame()
     return pd.DataFrame(orders[-limit:])
+
+
+def list_paper_orders(
+    limit: int = 50,
+    *,
+    account_id: str = "account1",
+    mode: ExecMode | str = ExecMode.PAPER,
+) -> pd.DataFrame:
+    """向後相容；建議改用 list_orders_for_profile。"""
+    profile = load_profile(account_id, mode)
+    return list_orders_for_profile(profile, limit=limit)
 
 
 def _signal_from_scan(
@@ -236,6 +289,7 @@ def _signal_from_scan(
     prep: pd.DataFrame,
     mode: OrderMode,
     leverage: int,
+    account_id: str,
 ) -> OrderRequest | None:
     signals = scan_signals_for(sid, prep)
     if not signals:
@@ -260,6 +314,7 @@ def _signal_from_scan(
         stop=float(plan.stop),
         quantity=qty,
         mode=mode,
+        account_id=account_id,
         order_type="market",
         price=float(plan.entry),
         leverage=leverage,
@@ -275,6 +330,7 @@ def scan_and_execute(
     market: MarketType = "futures",
     kline_limit: int = 500,
     leverage: int = 10,
+    account_id: str = "account1",
 ) -> list[dict]:
     """對多幣多策略掃描最新訊號並依模式下單。"""
     if isinstance(mode, str):
@@ -284,8 +340,9 @@ def scan_and_execute(
     else:
         order_mode = mode
 
-    if order_mode != OrderMode.PAPER and not credentials_configured(order_mode):
-        raise ValueError(credentials_hint(order_mode))
+    profile = load_profile(account_id, order_mode.value)
+    if order_mode != OrderMode.PAPER and not profile_configured(profile):
+        raise ValueError(credentials_hint(order_mode, account_id))
 
     placed: list[dict] = []
     for sym in symbols:
@@ -297,13 +354,15 @@ def scan_and_execute(
             except Exception:
                 continue
             prep = meta.prepare_df(with_symbol(raw, bin_sym, kline_limit=kline_limit))
-            req = _signal_from_scan(sym, sid, prep, order_mode, leverage)
+            req = _signal_from_scan(sym, sid, prep, order_mode, leverage, account_id)
             if req is None:
                 continue
             try:
                 placed.append(place_order(req, market=market))
             except Exception as e:
-                log.error(f"{order_mode.value} 下單失敗 {bin_sym} {sid}: {format_binance_error(e)}")
+                log.error(
+                    f"{profile.display_name} 下單失敗 {bin_sym} {sid}: {format_binance_error(e)}"
+                )
     return placed
 
 
@@ -312,6 +371,7 @@ def scan_and_paper_trade(
     strategy_ids: list[str],
     market: MarketType = "futures",
     kline_limit: int = 500,
+    account_id: str = "account1",
 ) -> list[dict]:
     """向後相容：僅 paper 模式。"""
     return scan_and_execute(
@@ -320,4 +380,5 @@ def scan_and_paper_trade(
         mode=OrderMode.PAPER,
         market=market,
         kline_limit=kline_limit,
+        account_id=account_id,
     )

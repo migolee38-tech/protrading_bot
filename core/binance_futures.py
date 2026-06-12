@@ -59,25 +59,48 @@ class FuturesSettings:
         cls,
         mode: ExecMode | str,
         *,
+        account_id: str = "account1",
         leverage: int = 10,
         total_capital: float | None = None,
         position_pct: float | None = None,
     ) -> "FuturesSettings":
-        import os
+        from core.account_profiles import load_profile
 
         if isinstance(mode, str):
             mode = ExecMode(mode)
-        api_key, api_secret = load_credentials(mode)
+        return cls.from_profile(
+            load_profile(account_id, mode),
+            leverage=leverage,
+            total_capital=total_capital,
+            position_pct=position_pct,
+        )
+
+    @classmethod
+    def from_profile(
+        cls,
+        profile: "AccountProfile",
+        *,
+        leverage: int = 10,
+        total_capital: float | None = None,
+        position_pct: float | None = None,
+    ) -> "FuturesSettings":
+        from core.account_profiles import (
+            credentials_for_profile,
+            profile_capital,
+            profile_position_pct,
+        )
+
+        api_key, api_secret = credentials_for_profile(profile)
         return cls(
             api_key=api_key,
             api_secret=api_secret,
-            testnet=mode == ExecMode.TESTNET,
+            testnet=profile.network == ExecMode.TESTNET,
             leverage=leverage,
             total_capital=float(
-                total_capital if total_capital is not None else os.getenv("LIVE_TOTAL_CAPITAL", "1000")
+                total_capital if total_capital is not None else profile_capital(profile)
             ),
             position_pct=float(
-                position_pct if position_pct is not None else os.getenv("LIVE_POSITION_PCT", "1")
+                position_pct if position_pct is not None else profile_position_pct(profile)
             ),
         )
 

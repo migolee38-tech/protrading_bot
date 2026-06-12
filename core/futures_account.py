@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from core.backtest_pnl import profit_factor_from_pnls
+from core.account_profiles import AccountProfile, load_profile, profile_capital
 from core.binance_credentials import ExecMode, credentials_configured, credentials_hint
 from core.binance_futures import FuturesSettings, create_client, fetch_open_algo_orders
 from core.order_tags import strategy_name_from_client_order_id
@@ -46,6 +47,8 @@ class AccountView:
     trades: pd.DataFrame
     income: pd.DataFrame
     strategy_stats: pd.DataFrame
+    account_id: str = "account1"
+    account_label: str = ""
     error: str | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -81,21 +84,28 @@ def _strategy_name(strategy_id: str) -> str:
     return STRATEGIES[strategy_id].name if strategy_id in STRATEGIES else str(strategy_id)
 
 
-def bot_orders_for_mode(mode: ExecMode | str, limit: int = 500) -> pd.DataFrame:
-    from core.order_executor import list_paper_orders
+def bot_orders_for_profile(profile: AccountProfile, limit: int = 500) -> pd.DataFrame:
+    from core.order_executor import list_orders_for_profile
 
-    orders = list_paper_orders(limit=limit)
-    if orders.empty or "mode" not in orders.columns:
+    orders = list_orders_for_profile(profile, limit=limit)
+    if orders.empty:
         return pd.DataFrame()
-    mode_val = mode.value if isinstance(mode, ExecMode) else str(mode)
-    out = orders[orders["mode"].astype(str) == mode_val].copy()
-    if out.empty:
-        return out
+    out = orders.copy()
     if "strategy_id" in out.columns:
         out["strategy_name"] = out["strategy_id"].map(_strategy_name)
     if "leverage" in out.columns:
         out["leverage"] = pd.to_numeric(out["leverage"], errors="coerce")
     return out.sort_values("created_at", ascending=False).reset_index(drop=True)
+
+
+def bot_orders_for_mode(
+    mode: ExecMode | str,
+    limit: int = 500,
+    account_id: str = "account1",
+) -> pd.DataFrame:
+    if isinstance(mode, str):
+        mode = ExecMode(mode)
+    return bot_orders_for_profile(load_profile(account_id, mode), limit=limit)
 
 
 def weighted_position_leverage(positions: pd.DataFrame) -> float | None:
@@ -628,15 +638,23 @@ def _income_df(rows: list[dict]) -> pd.DataFrame:
     return df.sort_values("time", ascending=False).reset_index(drop=True)
 
 
-def fetch_live_headline(mode: ExecMode) -> AccountHeadline:
+def fetch_live_headline(
+    mode: ExecMode,
+    account_id: str = "account1",
+) -> AccountHeadline:
+    """輕量即時帳戶摘要（向後相容）。"""
+    return fetch_live_headline_for_profile(load_profile(account_id, mode))
+
+
+def fetch_live_headline_for_profile(profile: AccountProfile) -> AccountHeadline:
     """
     輕量即時帳戶摘要：account + position_risk + 掛單數。
     供 Streamlit 頂部指標高頻刷新（未實現損益隨標記價浮動）。
     """
     empty = AccountHeadline()
-    if mode == ExecMode.PAPER:
-        capital = float(os.getenv("LIVE_TOTAL_CAPITAL", "1000"))
-        view = fetch_paper_account()
+    if profile.network == ExecMode.PAPER:
+        capital = profile_capital(profile)
+        view = fetch_paper_account(account_id=profile.account_id)
         return AccountHeadline(
             wallet_balance=capital,
             available_balance=capital,
@@ -646,12 +664,12 @@ def fetch_live_headline(mode: ExecMode) -> AccountHeadline:
             open_order_count=view.open_order_count,
         )
 
-    if not credentials_configured(mode):
-        empty.error = credentials_hint(mode)
+    if not credentials_configured(profile.network, profile.account_id):
+        empty.error = credentials_hint(profile.network, profile.account_id)
         return empty
 
     try:
-        settings = FuturesSettings.from_exec_mode(mode)
+        settings = FuturesSettings.from_profile(profile)
         client = create_client(settings)
         acct = client.account()
         assets = acct.get("assets", [])
@@ -683,15 +701,26 @@ def fetch_live_headline(mode: ExecMode) -> AccountHeadline:
         return empty
 
 
+def fetch_account(profile: AccountProfile, **kwargs: Any) -> AccountView:
+    """依 profile 拉取帳戶（paper / testnet / live）。"""
+    if profile.network == ExecMode.PAPER:
+        return fetch_paper_account(account_id=profile.account_id, **kwargs)
+    return fetch_futures_account(profile.network, account_id=profile.account_id, **kwargs)
+
+
 def fetch_futures_account(
     mode: ExecMode,
     *,
+    account_id: str = "account1",
     trade_limit_per_symbol: int = 50,
     income_limit: int = 200,
 ) -> AccountView:
     """從 Binance 永續 API 拉取 testnet / live 帳戶。"""
+    profile = load_profile(account_id, mode)
     empty = AccountView(
         mode=mode.value,
+        account_id=profile.account_id,
+        account_label=profile.label,
         wallet_balance=0.0,
         available_balance=0.0,
         unrealized_pnl=0.0,
@@ -709,19 +738,19 @@ def fetch_futures_account(
         income=pd.DataFrame(),
         strategy_stats=pd.DataFrame(),
     )
-    if not credentials_configured(mode):
-        empty.error = credentials_hint(mode)
+    if not credentials_configured(mode, account_id):
+        empty.error = credentials_hint(mode, account_id)
         return empty
 
     warnings: list[str] = []
     try:
-        settings = FuturesSettings.from_exec_mode(mode)
+        settings = FuturesSettings.from_profile(profile)
         client = create_client(settings)
     except Exception as e:
         empty.error = _format_api_error(e)
         return empty
 
-    bot_orders = bot_orders_for_mode(mode)
+    bot_orders = bot_orders_for_profile(profile)
 
     try:
         acct = client.account()
@@ -790,6 +819,8 @@ def fetch_futures_account(
 
     return AccountView(
         mode=mode.value,
+        account_id=profile.account_id,
+        account_label=profile.label,
         wallet_balance=wallet,
         available_balance=available,
         unrealized_pnl=unrealized,
@@ -810,14 +841,17 @@ def fetch_futures_account(
     )
 
 
-def fetch_paper_account(*, limit: int = 500) -> AccountView:
-    """本地模擬帳戶：從 paper_orders.json 組裝。"""
-    bot_orders = bot_orders_for_mode(ExecMode.PAPER, limit=limit)
-    capital = float(os.getenv("LIVE_TOTAL_CAPITAL", "1000"))
+def fetch_paper_account(*, account_id: str = "account1", limit: int = 500) -> AccountView:
+    """本地模擬帳戶：從 orders/{account_id}_paper.json 組裝。"""
+    profile = load_profile(account_id, ExecMode.PAPER)
+    bot_orders = bot_orders_for_profile(profile, limit=limit)
+    capital = profile_capital(profile)
 
     if bot_orders.empty:
         return AccountView(
             mode=ExecMode.PAPER.value,
+            account_id=profile.account_id,
+            account_label=profile.label,
             wallet_balance=capital,
             available_balance=capital,
             unrealized_pnl=0.0,
@@ -944,6 +978,8 @@ def fetch_paper_account(*, limit: int = 500) -> AccountView:
 
     return AccountView(
         mode=ExecMode.PAPER.value,
+        account_id=profile.account_id,
+        account_label=profile.label,
         wallet_balance=capital,
         available_balance=capital,
         unrealized_pnl=0.0,
