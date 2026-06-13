@@ -393,6 +393,7 @@ def _strategy_stats_from_positions(positions: pd.DataFrame) -> pd.DataFrame:
                 "profit_factor": None,
                 "avg_price": _float(row.get("entry_price"), 0) or None,
                 "entry_price": _float(row.get("entry_price"), 0) or None,
+                "close_price": None,
                 "open_time": row.get("open_time", ""),
                 "realized_pnl": 0.0,
             }
@@ -449,6 +450,7 @@ def complete_all_strategy_rows(stats: pd.DataFrame) -> pd.DataFrame:
                 "profit_factor": None,
                 "avg_price": None,
                 "entry_price": None,
+                "close_price": None,
                 "open_time": "",
                 "realized_pnl": 0.0,
             }
@@ -458,6 +460,21 @@ def complete_all_strategy_rows(stats: pd.DataFrame) -> pd.DataFrame:
     if base.empty:
         return base
     return base.sort_values("strategy_name").reset_index(drop=True)
+
+
+def _weighted_avg_price(frame: pd.DataFrame, price_col: str = "avg_price") -> float | None:
+    """依數量加權計算成交均價；無數量欄位時取平均。"""
+    if frame.empty or price_col not in frame.columns:
+        return None
+    prices = frame[price_col].astype(float)
+    if "quantity" in frame.columns:
+        qty = frame["quantity"].astype(float)
+        total = qty.sum()
+        if total > 0:
+            return float((prices * qty).sum() / total)
+    if len(prices) == 1:
+        return float(prices.iloc[0])
+    return float(prices.mean())
 
 
 def strategy_performance_table(trades: pd.DataFrame) -> pd.DataFrame:
@@ -498,6 +515,8 @@ def strategy_performance_table(trades: pd.DataFrame) -> pd.DataFrame:
         if entry_price is None:
             entry_price = avg_price
 
+        close_price = _weighted_avg_price(closed) if not closed.empty else None
+
         rows.append(
             {
                 "strategy_name": strategy,
@@ -509,6 +528,7 @@ def strategy_performance_table(trades: pd.DataFrame) -> pd.DataFrame:
                 "profit_factor": pf,
                 "avg_price": avg_price,
                 "entry_price": entry_price,
+                "close_price": close_price,
                 "open_time": open_time,
                 "realized_pnl": float(closed["realized_pnl"].sum()) if not closed.empty else 0.0,
             }

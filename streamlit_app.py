@@ -1406,6 +1406,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             "side": "方向",
             "open_time": "開單時間",
             "entry_price": "進場價",
+            "close_price": "出場價位",
             "leverage": "槓桿",
             "trade_count": "成交筆數",
             "win_rate": "勝率",
@@ -1414,6 +1415,23 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             "realized_pnl": "已實現損益",
         }
         show_stats = show_stats.rename(columns={k: v for k, v in rename.items() if k in show_stats.columns})
+        col_order = [
+            "開單時間",
+            "策略",
+            "交易對",
+            "方向",
+            "槓桿",
+            "勝率",
+            "獲利因子",
+            "已實現損益",
+            "進場價",
+            "出場價位",
+            "成交均價",
+            "成交筆數",
+        ]
+        ordered = [c for c in col_order if c in show_stats.columns]
+        ordered += [c for c in show_stats.columns if c not in ordered]
+        show_stats = show_stats[ordered]
         show_stats = _format_time_columns(show_stats, ("開單時間",))
         _display_account_table(show_stats, "尚無策略績效", height=220)
     else:
