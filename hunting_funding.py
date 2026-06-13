@@ -21,12 +21,16 @@ import requests
 from dotenv import load_dotenv
 
 from core.binance_futures import (
+    FuturesSettings,
     ensure_tradable_symbol,
     format_binance_error,
     get_tradable_symbols,
-    place_algo_conditional_order,
 )
+from core.account_profiles import load_profile
+from core.binance_credentials import ExecMode
+from core.position_manager import manage_positions_for_profile, register_live_position
 from core.order_tags import build_client_order_id
+from risk import build_hunting_trade_plan
 from core.universe import top_usdt_pairs_by_volume
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
@@ -856,10 +860,12 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
 
     client = make_futures_client(cfg)
 
-    side = "BUY" if direction == "LONG" else "SELL"
-    exit_side = "SELL" if direction == "LONG" else "BUY"
+    side = "long" if direction == "LONG" else "short"
     sl = bar.sl_long if direction == "LONG" else bar.sl_short
-    lv = calc_exit_levels(bar.close, sl, direction)
+    plan = build_hunting_trade_plan(side, bar.close, sl)
+    if plan is None:
+        log.error(f"{symbol} 止損風險過高，略過下單")
+        return
 
     lev = resolve_leverage(client, symbol, cfg)
     try:
@@ -870,16 +876,11 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
 
     margin = cfg.margin_per_trade
     qty_raw = margin * lev / bar.close
-    reduce_pct = cfg.tp1_reduce_pct
     try:
         step, _ = _get_lot_step(client, symbol)
         qty = _round_qty(qty_raw, step)
-        qty_tp1 = _round_qty(qty * reduce_pct, step)
-        qty_rest = _round_qty(qty - qty_tp1, step)
     except Exception:
         qty = round(qty_raw, 3)
-        qty_tp1 = round(qty * reduce_pct, 3)
-        qty_rest = round(qty - qty_tp1, 3)
 
     if qty <= 0:
         log.error(f"{symbol} 計算數量為 0，略過下單")
@@ -891,59 +892,41 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
         log.error(str(e))
         return
 
+    order_side = "BUY" if direction == "LONG" else "SELL"
     try:
         entry_cid = build_client_order_id("hunting_funding", symbol)
-        client.new_order(
+        entry_result = client.new_order(
             symbol=symbol,
-            side=side,
+            side=order_side,
             type="MARKET",
             quantity=qty,
             newClientOrderId=entry_cid,
         )
-        log.info(f"已下單 {side} {qty} {symbol} @ market")
-
-        # 初始止損（全倉）— Algo Order API
-        place_algo_conditional_order(
-            client,
-            symbol=symbol,
-            side=exit_side,
-            order_type="STOP_MARKET",
-            trigger_price=lv["sl"],
-            quantity=qty,
-        )
-        log.info(f"初始止損 Algo @ {lv['sl']:.4f}")
-
-        # 1R 減倉 30%
-        if qty_tp1 > 0:
-            place_algo_conditional_order(
-                client,
-                symbol=symbol,
-                side=exit_side,
-                order_type="TAKE_PROFIT_MARKET",
-                trigger_price=lv["r1"],
-                quantity=qty_tp1,
-            )
-            log.info(f"1R 減倉{reduce_pct*100:.0f}% Algo @ {lv['r1']:.4f}  qty={qty_tp1}")
-
-        # 5R 全出剩餘倉位
-        if qty_rest > 0:
-            place_algo_conditional_order(
-                client,
-                symbol=symbol,
-                side=exit_side,
-                order_type="TAKE_PROFIT_MARKET",
-                trigger_price=lv["r5"],
-                quantity=qty_rest,
-            )
-            log.info(f"5R 全出 Algo @ {lv['r5']:.4f}  qty={qty_rest}")
-
-        log.info(
-            f"保證金 {margin:.2f}U ({cfg.position_pct}% of {cfg.total_capital}U)  "
-            f"出場計畫：1R減倉{reduce_pct*100:.0f}%後止損移至 {bar.close:.4f} 保本；"
-            f"3R觸及後止損移至1R價 {lv['r1']:.4f}；5R全出"
-        )
+        log.info(f"已下單 {order_side} {qty} {symbol} @ market")
     except Exception as e:
         log.error(f"下單失敗: {format_binance_error(e)}")
+        return
+
+    mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
+    profile = load_profile("account1", mode)
+    try:
+        register_live_position(
+            profile,
+            client,
+            strategy_id="hunting_funding",
+            symbol=symbol,
+            side=side,
+            plan=plan,
+            quantity=qty,
+            entry_result=entry_result,
+            exchange_order_id=str(entry_result.get("orderId", "")),
+        )
+        log.info(
+            f"保證金 {margin:.2f}U ({cfg.position_pct}% of {cfg.total_capital}U)  "
+            f"出場：1R減倉{cfg.tp1_reduce_pct*100:.0f}%保本 → 3R止損移1R → 5R全出"
+        )
+    except Exception as e:
+        log.error(f"{symbol} 保護單/持倉登記失敗: {format_binance_error(e)}")
 
 
 def _kline_limit(cfg: Config) -> int:
@@ -1030,6 +1013,17 @@ def live_scan(cfg: Config):
             break
         except Exception as e:
             log.error(f"掃描錯誤: {e}")
+
+        if cfg.auto_trade:
+            mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
+            profile = load_profile("account1", mode)
+            settings = FuturesSettings.from_exec_mode(mode)
+            try:
+                managed = manage_positions_for_profile(profile, settings)
+                if managed:
+                    log.info(f"持倉管理更新 {managed} 筆")
+            except Exception as e:
+                log.error(f"持倉管理錯誤: {format_binance_error(e)}")
 
         time.sleep(30)
 

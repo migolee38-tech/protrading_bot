@@ -276,6 +276,65 @@ def place_algo_conditional_order(
     return client.sign_request("POST", "/fapi/v1/algoOrder", params)
 
 
+def cancel_algo_order(
+    client: "UMFutures",
+    algo_id: str | int,
+    *,
+    symbol: str | None = None,
+) -> dict | None:
+    """DELETE /fapi/v1/algoOrder"""
+    params: dict = {"algoId": int(algo_id)}
+    if symbol:
+        params["symbol"] = symbol
+    try:
+        return client.sign_request("DELETE", "/fapi/v1/algoOrder", params)
+    except Exception as e:
+        log.warning(f"取消 Algo {algo_id} 失敗: {format_binance_error(e)}")
+        return None
+
+
+def get_mark_price(client: "UMFutures", symbol: str) -> float:
+    data = client.mark_price(symbol=symbol)
+    return float(data.get("markPrice") or 0)
+
+
+def exchange_position_qty(client: "UMFutures", symbol: str, side: str) -> float:
+    """回傳該方向持倉數量（幣），無倉為 0。"""
+    try:
+        rows = client.get_position_risk(symbol=symbol)
+    except Exception:
+        return 0.0
+    for row in rows:
+        amt = float(row.get("positionAmt") or 0)
+        if side == "long" and amt > 0:
+            return amt
+        if side == "short" and amt < 0:
+            return abs(amt)
+    return 0.0
+
+
+def place_market_reduce(
+    client: "UMFutures",
+    *,
+    symbol: str,
+    side: str,
+    quantity: float,
+) -> dict | None:
+    """市價減倉（reduceOnly）。"""
+    exit_side = "SELL" if side == "long" else "BUY"
+    lot_step, _ = _symbol_filters(client, symbol)
+    qty = _round_qty(quantity, lot_step)
+    if qty <= 0:
+        return None
+    return client.new_order(
+        symbol=symbol,
+        side=exit_side,
+        type="MARKET",
+        quantity=qty,
+        reduceOnly="true",
+    )
+
+
 def fetch_open_algo_orders(client: "UMFutures", symbol: str | None = None) -> list[dict]:
     """GET /fapi/v1/openAlgoOrders"""
     params: dict = {}

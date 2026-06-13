@@ -169,6 +169,59 @@ def build_hunting_trade_plan(side: str, entry: float, stop: float) -> TradePlan 
     )
 
 
+def recalc_plan_for_fill(plan: TradePlan, fill_entry: float, strategy_id: str) -> TradePlan:
+    """以實際成交價重算 R 與止盈（止損價不變）。"""
+    stop = plan.stop
+    side = plan.side
+    r = abs(fill_entry - stop)
+    if r <= 0:
+        return TradePlan(
+            side=side,
+            entry=fill_entry,
+            stop=stop,
+            r=plan.r,
+            tp_1r=plan.tp_1r,
+            tp_2r=plan.tp_2r,
+            tp_final=plan.tp_final,
+            stop_source=plan.stop_source,
+            risk_pct=plan.risk_pct,
+            position_size=plan.position_size,
+        )
+
+    if strategy_id == "hunting_funding":
+        rr1, rr2, rr_final = 1.0, 3.0, 5.0
+    elif strategy_id == "donchian":
+        rr1 = cfg.DONCHIAN_RR_TP1
+        rr2 = cfg.DONCHIAN_RR_TP2
+        rr_final = cfg.DONCHIAN_RR_TP3
+    else:
+        rr1 = cfg.RR_PARTIAL_1
+        rr2 = cfg.RR_PARTIAL_2
+        rr_final = cfg.RR_FINAL
+
+    if side == "long":
+        tp_1r = fill_entry + rr1 * r
+        tp_2r = fill_entry + rr2 * r
+        tp_final = fill_entry + rr_final * r
+    else:
+        tp_1r = fill_entry - rr1 * r
+        tp_2r = fill_entry - rr2 * r
+        tp_final = fill_entry - rr_final * r
+
+    return TradePlan(
+        side=side,
+        entry=fill_entry,
+        stop=stop,
+        r=r,
+        tp_1r=tp_1r,
+        tp_2r=tp_2r,
+        tp_final=tp_final,
+        stop_source=plan.stop_source,
+        risk_pct=_risk_pct(fill_entry, stop, side),
+        position_size=plan.position_size,
+    )
+
+
 def calc_donchian_position_size(entry: float, stop: float) -> float:
     """定損 2U：倉位數量 = 風險金額 / 每單位價格風險。"""
     per_unit = abs(entry - stop)

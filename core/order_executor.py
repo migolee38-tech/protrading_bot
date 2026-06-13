@@ -21,15 +21,17 @@ from core.account_profiles import (
 )
 from core.binance_credentials import ExecMode, credentials_hint, mode_label
 from core.binance_futures import (
-    BracketOrderError,
     FuturesSettings,
+    _round_qty,
+    _symbol_filters,
     calc_order_quantity,
     create_client,
     ensure_tradable_symbol,
     format_binance_error,
-    place_bracket_order,
     resolve_leverage,
 )
+from risk import TradePlan, recalc_plan_for_fill
+from core.position_manager import manage_positions_for_profile, register_live_position
 from core.order_tags import build_client_order_id
 from core.market_data import MarketType, fetch_klines
 from core.strategy_registry import get_strategy, scan_signals_for, with_symbol
@@ -62,6 +64,7 @@ class OrderRequest:
     leverage: int = 10
     take_profit: float | None = None
     margin_type: str = "cross"
+    trade_plan: TradePlan | None = None
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -159,6 +162,24 @@ def place_paper_order(req: OrderRequest) -> dict:
     return _append_order(req.profile, row)
 
 
+def _plan_from_request(req: OrderRequest, qty: float) -> TradePlan:
+    if req.trade_plan is not None:
+        return req.trade_plan
+    stub = TradePlan(
+        side=req.side,
+        entry=req.entry,
+        stop=req.stop,
+        r=abs(req.entry - req.stop),
+        tp_1r=req.entry,
+        tp_2r=req.entry,
+        tp_final=float(req.take_profit or req.entry),
+        stop_source="order",
+        risk_pct=0.0,
+        position_size=qty,
+    )
+    return recalc_plan_for_fill(stub, req.entry, req.strategy_id)
+
+
 def place_futures_order(req: OrderRequest) -> dict:
     """永續合約下單（testnet 或 live）。"""
     if req.mode not in (OrderMode.TESTNET, OrderMode.LIVE):
@@ -185,40 +206,65 @@ def place_futures_order(req: OrderRequest) -> dict:
     ensure_tradable_symbol(client, sym, testnet=settings.testnet)
     client_order_id = build_client_order_id(req.strategy_id, sym)
 
+    order_side = "BUY" if req.side == "long" else "SELL"
     try:
-        bracket = place_bracket_order(
+        client.change_leverage(symbol=sym, leverage=lev)
+    except Exception as e:
+        log.warning(f"{sym} 設定槓桿失敗: {format_binance_error(e)}")
+
+    lot_step, _ = _symbol_filters(client, sym)
+    qty = _round_qty(qty, lot_step)
+    if qty <= 0:
+        raise ValueError(f"{sym} 計算數量為 0")
+
+    entry_kwargs: dict = {
+        "symbol": sym,
+        "side": order_side,
+        "type": "MARKET",
+        "quantity": qty,
+        "newClientOrderId": client_order_id,
+    }
+    try:
+        entry_result = client.new_order(**entry_kwargs)
+    except Exception as e:
+        raise ValueError(f"{sym} 市價進場失敗: {format_binance_error(e)}") from e
+
+    plan = _plan_from_request(req, qty)
+    protection_error: str | None = None
+    live_state = None
+    try:
+        live_state = register_live_position(
+            profile,
             client,
+            strategy_id=req.strategy_id,
             symbol=sym,
             side=req.side,
+            plan=plan,
             quantity=qty,
-            stop=req.stop,
-            take_profit=req.take_profit,
-            leverage=lev,
-            strategy_id=req.strategy_id,
-            client_order_id=client_order_id,
-            testnet=settings.testnet,
+            entry_result=entry_result,
+            exchange_order_id=str(entry_result.get("orderId", "")),
         )
-    except BracketOrderError as e:
-        row = req.to_dict()
-        row["quantity"] = qty
-        row["leverage"] = lev
-        row["status"] = "filled_naked"
-        row["exchange_order_id"] = e.result.entry.get("orderId")
-        row["client_order_id"] = e.result.entry.get("clientOrderId") or client_order_id
-        row["error"] = str(e)
-        _append_order(profile, row)
-        raise ValueError(str(e)) from e
+    except Exception as e:
+        protection_error = format_binance_error(e)
+        log.error(f"{sym} 持倉登記/保護單失敗: {protection_error}")
 
     row = req.to_dict()
     row["quantity"] = qty
     row["leverage"] = lev
-    row["status"] = "filled_testnet" if req.mode == OrderMode.TESTNET else "filled_live"
-    row["exchange_order_id"] = bracket.entry.get("orderId")
-    row["client_order_id"] = bracket.entry.get("clientOrderId") or client_order_id
-    if bracket.stop_algo:
-        row["stop_algo_id"] = bracket.stop_algo.get("algoId")
-    if bracket.take_profit_algo:
-        row["take_profit_algo_id"] = bracket.take_profit_algo.get("algoId")
+    if protection_error:
+        row["status"] = "filled_naked"
+        row["error"] = protection_error
+    else:
+        row["status"] = "filled_testnet" if req.mode == OrderMode.TESTNET else "filled_live"
+    row["exchange_order_id"] = entry_result.get("orderId")
+    row["client_order_id"] = entry_result.get("clientOrderId") or client_order_id
+    if live_state and live_state.stop_algo_id:
+        row["stop_algo_id"] = live_state.stop_algo_id
+    if live_state and live_state.tp_algo_ids:
+        row["take_profit_algo_ids"] = live_state.tp_algo_ids
+    if protection_error:
+        _append_order(profile, row)
+        raise ValueError(protection_error)
     return _append_order(profile, row)
 
 
@@ -320,6 +366,7 @@ def _signal_from_scan(
         leverage=leverage,
         take_profit=_optional_tp(getattr(plan, "tp_final", None)),
         margin_type="cross",
+        trade_plan=plan,
     )
 
 
@@ -363,6 +410,11 @@ def scan_and_execute(
                 log.error(
                     f"{profile.display_name} 下單失敗 {bin_sym} {sid}: {format_binance_error(e)}"
                 )
+    if order_mode != OrderMode.PAPER:
+        try:
+            manage_positions_for_profile(profile)
+        except Exception as e:
+            log.error(f"{profile.display_name} 持倉管理失敗: {format_binance_error(e)}")
     return placed
 
 

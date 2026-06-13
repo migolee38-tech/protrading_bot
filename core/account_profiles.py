@@ -224,4 +224,10 @@ def state_file_for_profile(profile: AccountProfile) -> Path:
     return base / f"{profile.profile_id}.json"
 
 
+def live_positions_file_for_profile(profile: AccountProfile) -> Path:
+    base = Path(__file__).resolve().parent.parent / "data" / "live_positions"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{profile.profile_id}.json"
+
+
 _LEGACY_ORDERS = Path(__file__).resolve().parent.parent / "data" / "paper_orders.json"

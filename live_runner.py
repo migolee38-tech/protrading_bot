@@ -44,6 +44,7 @@ from core.binance_futures import (
 )
 from core.market_data import MarketType, fetch_klines
 from core.order_executor import OrderMode, OrderRequest, place_order
+from core.position_manager import manage_positions_for_profile
 from core.strategy_registry import STRATEGIES, get_strategy, scan_signals_for, with_symbol
 from core.universe import top_usdt_pairs_by_volume
 
@@ -192,6 +193,7 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
                 price=float(plan.entry),
                 leverage=cfg.futures.leverage,
                 take_profit=tp if tp and tp > 0 else None,
+                trade_plan=plan,
             )
             try:
                 row = place_order(req, market=cfg.market)
@@ -208,6 +210,12 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
         executed = dict(list(executed.items())[-3000:])
     state["executed"] = executed
     _save_state(cfg.profile, state)
+
+    if order_mode != OrderMode.PAPER:
+        managed = manage_positions_for_profile(cfg.profile, cfg.futures)
+        if managed:
+            log.info(f"[{cfg.profile.display_name}] 持倉管理更新 {managed} 筆")
+
     return placed
 
 
