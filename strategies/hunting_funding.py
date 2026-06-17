@@ -90,6 +90,7 @@ class OIDataStatus:
     oi_period: str
     kline_limit: int
     kline_limit_warning: str
+    source: str = ""
 
 
 @dataclass
@@ -158,6 +159,7 @@ def _build_oi_status(
         oi_period=fetch.period,
         kline_limit=kline_limit,
         kline_limit_warning=_kline_limit_warning(kline_limit, total),
+        source=fetch.source,
     )
 
 

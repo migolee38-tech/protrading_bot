@@ -2,12 +2,11 @@
 Hunting Funding — Python 完整移植版
 100% 對應 Pine Script v6 邏輯（含自訂修訂）
 功能：即時掃描 + 發報 + 自動交易進場 + 回測分析
-資料來源：Binance 永續合約 API（USDT-M Futures / USDT.P）
+資料來源：永續合約公開 API（依 EXCHANGE 使用 Binance / OKX）
 """
 
 import os
 import time
-import math
 import logging
 import argparse
 from datetime import datetime, timezone
@@ -18,35 +17,40 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import requests
-from dotenv import load_dotenv
 
-from core.binance_futures import (
-    FuturesSettings,
-    ensure_tradable_symbol,
-    format_binance_error,
-    get_tradable_symbols,
-)
+from core.env_bootstrap import load_project_env
 from core.account_profiles import load_profile
 from core.binance_credentials import ExecMode
+from core.exchange_bridge import (
+    credentials_configured,
+    credentials_hint,
+    exchange_label,
+    verify_futures_connection,
+)
+from core.exchange_config import is_okx
+from core.futures_execution import (
+    calc_order_quantity,
+    create_futures_clients,
+    ensure_symbol_tradable,
+    format_futures_error,
+    get_tradable_symbols,
+    place_market_entry,
+    resolve_leverage,
+    settings_for_profile,
+)
 from core.position_manager import manage_positions_for_profile, register_live_position
-from core.order_tags import build_client_order_id
+from core.order_tags import build_client_order_id, build_okx_client_order_id
 from risk import build_hunting_trade_plan
 from core.universe import top_usdt_pairs_by_volume
 
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_project_env()
 
-# ── 選用套件（telegram / binance order） ──────────────────────────
+# ── 選用套件（telegram） ──────────────────────────────────────────
 try:
     import telegram
     HAS_TELEGRAM = True
 except ImportError:
     HAS_TELEGRAM = False
-
-try:
-    from binance.um_futures import UMFutures
-    HAS_BINANCE_CLIENT = True
-except ImportError:
-    HAS_BINANCE_CLIENT = False
 
 # ═══════════════════════════════════════════════════════════════════
 # 日誌設定
@@ -128,9 +132,10 @@ class Config:
     def margin_per_trade(self) -> float:
         return self.total_capital * self.position_pct / 100.0
 
-    # ── Binance API ───────────────────────────────────────────────
+    # ── API（自動交易時由環境變數載入；CLI 可覆寫 key/secret）──
     api_key: str       = ""
     api_secret: str    = ""
+    api_passphrase: str = ""
     testnet: bool      = True          # 預設用測試網，安全第一
 
     # ── Telegram 通知 ─────────────────────────────────────────────
@@ -146,9 +151,68 @@ class Config:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Binance REST 工具
+# 行情資料（core.market_data 路由 Binance / OKX）
 # ═══════════════════════════════════════════════════════════════════
-FAPI = "https://fapi.binance.com"
+
+
+def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
+    """抓永續合約 K 線，回傳以 open_time 為 index 的 DataFrame。"""
+    from core.market_data import BinanceAPIError, fetch_klines as md_klines
+
+    try:
+        raw = md_klines(symbol, interval=interval, limit=limit, market="futures")
+    except BinanceAPIError as exc:
+        raise RuntimeError(str(exc)) from exc
+    df = raw.rename(columns={"datetime": "open_time"}).copy()
+    df.set_index("open_time", inplace=True)
+    return df[["open", "high", "low", "close", "volume"]]
+
+
+def fetch_open_interest_history(symbol: str, interval: str, limit: int = 500) -> pd.Series:
+    """抓 OI 歷史，回傳與 K 線對齊的 Series（index = timestamp）。"""
+    from core.market_data import fetch_open_interest_history as md_oi
+
+    result = md_oi(symbol, interval, limit=limit)
+    if not result.ok:
+        log.debug(f"{symbol} OI: {result.error}")
+        return pd.Series(dtype=float)
+    return result.series
+
+
+def fetch_latest_oi(symbol: str) -> Optional[float]:
+    """抓最新一筆 OI。"""
+    if is_okx():
+        from core.okx_futures import to_inst_id
+        from core.okx_market_data import _get
+
+        inst_id = to_inst_id(symbol)
+        payload = _get("/api/v5/public/open-interest", {"instId": inst_id})
+        rows = payload.get("data") or []
+        if rows:
+            return float(rows[0].get("oi") or 0)
+        return None
+
+    url = "https://fapi.binance.com/fapi/v1/openInterest"
+    r = requests.get(url, params={"symbol": symbol}, timeout=5)
+    r.raise_for_status()
+    return float(r.json()["openInterest"])
+
+
+def _settings_from_cfg(profile, cfg: Config):
+    lev = cfg.leverage if cfg.leverage > 0 else 10
+    settings = settings_for_profile(
+        profile,
+        leverage=lev,
+        total_capital=cfg.total_capital,
+        position_pct=cfg.position_pct,
+    )
+    if cfg.api_key:
+        settings.api_key = cfg.api_key
+    if cfg.api_secret:
+        settings.api_secret = cfg.api_secret
+    if is_okx() and cfg.api_passphrase:
+        settings.passphrase = cfg.api_passphrase
+    return settings
 
 
 def fetch_top_volume_symbols(top_n: int = 100) -> list[str]:
@@ -167,11 +231,14 @@ def resolve_symbols(cfg: Config) -> list[str]:
         symbols = fetch_top_volume_symbols(cfg.top_n)
     else:
         symbols = [sym]
-    if not cfg.auto_trade or not HAS_BINANCE_CLIENT:
+    if not cfg.auto_trade:
         return symbols
+    mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
+    profile = load_profile("account1", mode)
     try:
-        client = make_futures_client(cfg)
-        tradable = get_tradable_symbols(client, testnet=cfg.testnet)
+        settings = _settings_from_cfg(profile, cfg)
+        clients = create_futures_clients(settings)
+        tradable = get_tradable_symbols(clients, testnet=cfg.testnet)
         filtered = [s for s in symbols if s.upper() in tradable]
         skipped = len(symbols) - len(filtered)
         if skipped:
@@ -179,61 +246,8 @@ def resolve_symbols(cfg: Config) -> list[str]:
             log.info(f"略過 {skipped} 個在 {net} 不可交易的 symbol")
         return filtered
     except Exception as e:
-        log.warning(f"過濾可交易 symbol 失敗: {format_binance_error(e)}")
+        log.warning(f"過濾可交易 symbol 失敗: {format_futures_error(e)}")
         return symbols
-
-
-def fetch_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    """抓永續合約 K 線，回傳 DataFrame"""
-    url = f"{FAPI}/fapi/v1/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    df = pd.DataFrame(data, columns=[
-        "open_time","open","high","low","close","volume",
-        "close_time","quote_vol","trades","taker_buy_base",
-        "taker_buy_quote","ignore"
-    ])
-    for col in ["open","high","low","close","volume"]:
-        df[col] = df[col].astype(float)
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    df.set_index("open_time", inplace=True)
-    return df
-
-
-def fetch_open_interest_history(symbol: str, interval: str, limit: int = 500) -> pd.Series:
-    """
-    抓 OI 歷史（/futures/data/openInterestHist）
-    回傳與 K 線對齊的 Series（index = timestamp）
-    注意：Binance OI hist 最多回 500 筆，且最小週期 5m
-    """
-    period_map = {
-        "1m":"5m","3m":"5m","5m":"5m","15m":"15m",
-        "30m":"30m","1h":"1h","2h":"2h","4h":"4h",
-        "6h":"6h","12h":"12h","1d":"1d"
-    }
-    period = period_map.get(interval, "5m")
-    url = f"{FAPI}/futures/data/openInterestHist"
-    params = {"symbol": symbol, "period": period, "limit": limit}
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    if not data:
-        return pd.Series(dtype=float)
-    s = pd.Series(
-        {pd.Timestamp(d["timestamp"], unit="ms", tz="UTC"): float(d["sumOpenInterest"])
-         for d in data}
-    )
-    return s
-
-
-def fetch_latest_oi(symbol: str) -> Optional[float]:
-    """抓最新一筆 OI"""
-    url = f"{FAPI}/fapi/v1/openInterest"
-    r = requests.get(url, params={"symbol": symbol}, timeout=5)
-    r.raise_for_status()
-    return float(r.json()["openInterest"])
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -786,80 +800,34 @@ def format_signal(bar: BarResult, direction: str, symbol: str, interval: str) ->
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 自動下單（Binance USDT-M Futures）
+# 自動下單（Binance / OKX 永續，經 futures_execution）
 # ═══════════════════════════════════════════════════════════════════
 
-def _round_qty(qty: float, step: float) -> float:
-    if step <= 0:
-        return round(qty, 3)
-    precision = int(round(-math.log10(step)))
-    adjusted = math.floor(qty / step) * step
-    return round(adjusted, precision)
 
-
-def _get_lot_step(client: UMFutures, symbol: str) -> tuple[float, int]:
-    info = client.exchange_info()
-    sym_info = next(s for s in info["symbols"] if s["symbol"] == symbol)
-    step = float(next(f["stepSize"] for f in sym_info["filters"] if f["filterType"] == "LOT_SIZE"))
-    precision = int(round(-math.log10(step))) if step > 0 else 3
-    return step, precision
-
-
-def make_futures_client(cfg: Config) -> "UMFutures":
-    """建立 USDT-M 永續客戶端（testnet 或主網）。"""
-    base_url = "https://testnet.binancefuture.com" if cfg.testnet else None
-    return UMFutures(key=cfg.api_key, secret=cfg.api_secret, base_url=base_url)
-
-
-def verify_binance_connection(cfg: Config) -> bool:
-    """啟動前驗證 API 金鑰與模擬倉連線。"""
-    from core.binance_credentials import ExecMode, credentials_hint
-
-    if not cfg.api_key or not cfg.api_secret:
-        mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
-        log.error(f"缺少 API 金鑰。{credentials_hint(mode)}")
+def verify_exchange_connection(cfg: Config) -> bool:
+    """啟動前驗證 API 金鑰與連線。"""
+    mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
+    if not credentials_configured(mode, "account1"):
+        log.error(f"缺少 API 金鑰。{credentials_hint(mode, 'account1')}")
         return False
-    if not HAS_BINANCE_CLIENT:
-        log.error("請安裝 binance-futures-connector: pip install binance-futures-connector")
+    profile = load_profile("account1", mode)
+    settings = _settings_from_cfg(profile, cfg)
+    if is_okx() and not settings.passphrase:
+        log.error(f"缺少 OKX passphrase。{credentials_hint(mode, 'account1')}")
         return False
-    net = "Testnet 模擬倉" if cfg.testnet else "主網實盤"
-    try:
-        client = make_futures_client(cfg)
-        acct = client.account()
-        assets = acct.get("assets", [])
-        usdt = next((a for a in assets if a.get("asset") == "USDT"), None)
-        balance = float(usdt["walletBalance"]) if usdt else 0.0
-        log.info(f"✅ 已連線 Binance 永續 {net}  可用 USDT: {balance:.2f}")
-        return True
-    except Exception as e:
-        log.error(f"❌ Binance {net} 連線失敗: {e}")
-        if cfg.testnet:
-            log.error("請確認金鑰來自 https://testnet.binancefuture.com（非主網 api.binance.com）")
-        return False
-
-
-def resolve_leverage(client: UMFutures, symbol: str, cfg: Config) -> int:
-    """0 表示使用該交易對允許的最大槓桿。"""
-    if cfg.leverage > 0:
-        return cfg.leverage
-    try:
-        brackets = client.leverage_brackets(symbol=symbol)
-        if brackets:
-            return max(int(b["initialLeverage"]) for b in brackets[0]["brackets"])
-    except Exception as e:
-        log.warning(f"取得 {symbol} 最大槓桿失敗: {e}")
-    return 20
+    return verify_futures_connection(settings)
 
 
 def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
     if not cfg.auto_trade:
         return
-    if not HAS_BINANCE_CLIENT:
-        log.error("請安裝 binance-futures-connector: pip install binance-futures-connector")
+
+    mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
+    if not credentials_configured(mode, "account1"):
+        log.error(f"缺少 API 金鑰。{credentials_hint(mode, 'account1')}")
         return
 
-    client = make_futures_client(cfg)
-
+    profile = load_profile("account1", mode)
     side = "long" if direction == "LONG" else "short"
     sl = bar.sl_long if direction == "LONG" else bar.sl_short
     plan = build_hunting_trade_plan(side, bar.close, sl)
@@ -867,66 +835,68 @@ def place_order(cfg: Config, direction: str, bar: BarResult, symbol: str):
         log.error(f"{symbol} 止損風險過高，略過下單")
         return
 
-    lev = resolve_leverage(client, symbol, cfg)
-    try:
-        client.change_leverage(symbol=symbol, leverage=lev)
-        log.info(f"{symbol} 槓桿設為 {lev}x")
-    except Exception as e:
-        log.warning(f"設定槓桿失敗: {e}")
-
-    margin = cfg.margin_per_trade
-    qty_raw = margin * lev / bar.close
-    try:
-        step, _ = _get_lot_step(client, symbol)
-        qty = _round_qty(qty_raw, step)
-    except Exception:
-        qty = round(qty_raw, 3)
-
-    if qty <= 0:
-        log.error(f"{symbol} 計算數量為 0，略過下單")
-        return
+    settings = _settings_from_cfg(profile, cfg)
+    clients = create_futures_clients(settings)
+    sym = symbol.replace("/", "").upper()
 
     try:
-        ensure_tradable_symbol(client, symbol, testnet=cfg.testnet)
+        ensure_symbol_tradable(clients, sym, testnet=settings.testnet)
     except ValueError as e:
         log.error(str(e))
         return
 
-    order_side = "BUY" if direction == "LONG" else "SELL"
-    try:
-        entry_cid = build_client_order_id("hunting_funding", symbol)
-        entry_result = client.new_order(
-            symbol=symbol,
-            side=order_side,
-            type="MARKET",
-            quantity=qty,
-            newClientOrderId=entry_cid,
-        )
-        log.info(f"已下單 {order_side} {qty} {symbol} @ market")
-    except Exception as e:
-        log.error(f"下單失敗: {format_binance_error(e)}")
+    lev = resolve_leverage(clients, sym, settings)
+    qty = calc_order_quantity(
+        clients=clients,
+        symbol=sym,
+        entry=bar.close,
+        position_size=0,
+        strategy_id="hunting_funding",
+        settings=settings,
+        leverage=lev,
+    )
+    if qty <= 0:
+        log.error(f"{symbol} 計算數量為 0，略過下單")
         return
 
-    mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
-    profile = load_profile("account1", mode)
+    client_order_id = (
+        build_okx_client_order_id("hunting_funding", sym)
+        if is_okx()
+        else build_client_order_id("hunting_funding", sym)
+    )
+    try:
+        entry_result = place_market_entry(
+            clients,
+            symbol=sym,
+            side=side,
+            quantity=qty,
+            client_order_id=client_order_id,
+        )
+        log.info(f"已下單 {side} {qty} {sym} @ market")
+    except Exception as e:
+        log.error(f"下單失敗: {format_futures_error(e)}")
+        return
+
     try:
         register_live_position(
             profile,
-            client,
+            clients,
             strategy_id="hunting_funding",
-            symbol=symbol,
+            symbol=sym,
             side=side,
             plan=plan,
             quantity=qty,
             entry_result=entry_result,
-            exchange_order_id=str(entry_result.get("orderId", "")),
+            exchange_order_id=str(
+                entry_result.get("orderId") or entry_result.get("ordId") or ""
+            ),
         )
         log.info(
-            f"保證金 {margin:.2f}U ({cfg.position_pct}% of {cfg.total_capital}U)  "
+            f"保證金 {cfg.margin_per_trade:.2f}U ({cfg.position_pct}% of {cfg.total_capital}U)  "
             f"出場：1R減倉{cfg.tp1_reduce_pct*100:.0f}%保本 → 3R止損移1R → 5R全出"
         )
     except Exception as e:
-        log.error(f"{symbol} 保護單/持倉登記失敗: {format_binance_error(e)}")
+        log.error(f"{symbol} 保護單/持倉登記失敗: {format_futures_error(e)}")
 
 
 def _kline_limit(cfg: Config) -> int:
@@ -945,7 +915,7 @@ def scan_symbol(cfg: Config, symbol: str, engine: HuntingEngine) -> tuple[pd.Dat
 # ═══════════════════════════════════════════════════════════════════
 
 def live_scan(cfg: Config):
-    if cfg.auto_trade and not verify_binance_connection(cfg):
+    if cfg.auto_trade and not verify_exchange_connection(cfg):
         raise SystemExit(1)
 
     engine = HuntingEngine(cfg)
@@ -1017,13 +987,13 @@ def live_scan(cfg: Config):
         if cfg.auto_trade:
             mode = ExecMode.TESTNET if cfg.testnet else ExecMode.LIVE
             profile = load_profile("account1", mode)
-            settings = FuturesSettings.from_exec_mode(mode)
+            settings = _settings_from_cfg(profile, cfg)
             try:
                 managed = manage_positions_for_profile(profile, settings)
                 if managed:
                     log.info(f"持倉管理更新 {managed} 筆")
             except Exception as e:
-                log.error(f"持倉管理錯誤: {format_binance_error(e)}")
+                log.error(f"持倉管理錯誤: {format_futures_error(e)}")
 
         time.sleep(30)
 
@@ -1126,18 +1096,20 @@ def parse_args():
     p.add_argument("--tg-token",   default=os.getenv("TG_TOKEN",""))
     p.add_argument("--tg-chat-id", default=os.getenv("TG_CHAT_ID",""))
     p.add_argument("--verify-only", action="store_true",
-                   help="僅測試 Binance API 連線後結束")
+                   help=f"僅測試 {exchange_label()} API 連線後結束")
     return p.parse_args()
 
 
 def main():
-    from core.binance_credentials import ExecMode, load_credentials
+    from core.exchange_bridge import credentials_for_profile
 
     args = parse_args()
     cred_mode = ExecMode.TESTNET if args.testnet else ExecMode.LIVE
-    env_key, env_secret = load_credentials(cred_mode)
+    profile = load_profile("account1", cred_mode)
+    env_key, env_secret, env_pass = credentials_for_profile(profile)
     api_key = args.api_key or env_key
     api_secret = args.api_secret or env_secret
+    api_passphrase = env_pass
     cfg  = Config(
         symbol           = args.symbol,
         top_n            = args.top_n,
@@ -1161,12 +1133,13 @@ def main():
         leverage         = args.leverage,
         api_key          = api_key,
         api_secret       = api_secret,
+        api_passphrase   = api_passphrase,
         tg_token         = args.tg_token,
         tg_chat_id       = args.tg_chat_id,
     )
 
     if args.verify_only:
-        ok = verify_binance_connection(cfg)
+        ok = verify_exchange_connection(cfg)
         raise SystemExit(0 if ok else 1)
 
     if args.mode == "live":

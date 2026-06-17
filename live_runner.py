@@ -19,6 +19,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 
 from core.env_bootstrap import load_project_env
@@ -30,18 +31,17 @@ _cleared = maybe_clear_from_env()
 from core.account_profiles import (
     AccountProfile,
     load_profile,
-    profile_configured,
     runner_profiles,
     state_file_for_profile,
 )
 from core.binance_credentials import ExecMode, mode_label
-from core.binance_futures import (
-    FuturesSettings,
-    create_client,
-    format_binance_error,
-    get_tradable_symbols,
-    verify_connection,
+from core.exchange_bridge import (
+    format_exchange_error,
+    futures_settings_from_profile,
+    profile_configured,
+    verify_futures_connection,
 )
+from core.exchange_config import active_exchange
 from core.market_data import MarketType, fetch_klines
 from core.order_executor import OrderMode, OrderRequest, place_order
 from core.position_manager import manage_positions_for_profile
@@ -74,11 +74,11 @@ class ProfileRunnerConfig:
     top_n: int = 100
     market: MarketType = "futures"
     kline_limit: int = 800
-    futures: FuturesSettings | None = None
+    futures: Any = None
 
     def __post_init__(self) -> None:
         if self.futures is None:
-            self.futures = FuturesSettings.from_profile(self.profile)
+            self.futures = futures_settings_from_profile(self.profile)
 
 
 @dataclass
@@ -120,9 +120,11 @@ def _resolve_symbols(top_n: int) -> list[str]:
 def _filter_tradable_symbols(symbols: list[str], cfg: ProfileRunnerConfig) -> list[str]:
     if cfg.profile.network == ExecMode.PAPER:
         return symbols
+    from core.futures_execution import create_futures_clients, get_tradable_symbols
+
     assert cfg.futures is not None
-    client = create_client(cfg.futures)
-    tradable = get_tradable_symbols(client, testnet=cfg.futures.testnet)
+    clients = create_futures_clients(cfg.futures)
+    tradable = get_tradable_symbols(clients, testnet=cfg.futures.testnet)
     filtered = [s for s in symbols if s.replace("/", "").upper() in tradable]
     skipped = len(symbols) - len(filtered)
     if skipped:
@@ -203,7 +205,7 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
             except Exception as e:
                 log.error(
                     f"[{cfg.profile.display_name}] {sid} {bin_sym} 下單失敗: "
-                    f"{format_binance_error(e)}"
+                    f"{format_exchange_error(e)}"
                 )
 
     if len(executed) > 5000:
@@ -234,7 +236,7 @@ def run_loop(cfg: RunnerConfig) -> None:
             log.error(f"[{pcfg.profile.display_name}] 缺少 API 金鑰，略過此 profile。")
             continue
         assert pcfg.futures is not None
-        if not verify_connection(pcfg.futures):
+        if not verify_futures_connection(pcfg.futures):
             raise SystemExit(1)
 
     names = ", ".join(get_strategy(s).name for s in cfg.profiles[0].strategy_ids)
@@ -336,7 +338,7 @@ def main() -> None:
                 strategy_ids=strategy_ids,
                 top_n=args.top_n,
                 kline_limit=args.kline_limit,
-                futures=FuturesSettings.from_profile(
+                futures=futures_settings_from_profile(
                     profile,
                     leverage=args.leverage,
                     total_capital=args.total_capital,
@@ -346,6 +348,7 @@ def main() -> None:
         )
 
     if args.verify_only:
+        log.info(f"交易所: {active_exchange()}")
         ok = True
         for pcfg in profile_cfgs:
             p = pcfg.profile
@@ -357,7 +360,7 @@ def main() -> None:
                 ok = False
                 continue
             assert pcfg.futures is not None
-            if verify_connection(pcfg.futures):
+            if verify_futures_connection(pcfg.futures):
                 log.info(f"✅ {p.display_name}")
             else:
                 ok = False

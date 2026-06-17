@@ -44,13 +44,18 @@ from core.market_data import MarketType, fetch_klines, fetch_symbol_last_price, 
 from core.account_profiles import (
     AccountProfile,
     account_label,
-    credential_env_names,
-    credentials_for_profile,
     list_account_ids,
     load_profile,
     profile_from_id,
 )
-from core.binance_credentials import ExecMode, credentials_configured, credentials_hint, mode_label
+from core.binance_credentials import ExecMode, mode_label
+from core.exchange_bridge import (
+    credential_env_names,
+    credentials_configured,
+    credentials_for_profile,
+    credentials_hint,
+    exchange_label,
+)
 from core.futures_account import (
     AccountHeadline,
     AccountView,
@@ -493,8 +498,9 @@ def _render_hunting_oi_status(
     c4.metric("OI 週期", status.oi_period or "—")
 
     if status.ok:
+        src = getattr(status, "source", "") or "openInterestHist"
         st.caption(
-            f"來源：Binance `openInterestHist` · {status.symbol} · "
+            f"來源：{exchange_label()} `{src}` · {status.symbol} · "
             f"已對齊 {status.valid_bars} 根 K 線"
         )
     elif not status.error:
@@ -937,7 +943,7 @@ def _main_workstation(
                     "箭頭仍依圖表週期資料計算（可能與策略預期週期不一致）。"
                 )
         except Exception as exc:
-            _show_binance_source_banner()
+            _show_market_source_banner()
             st.error(
                 f"無法載入圖表：{exc}\n\n"
                 "若無法連幣安，請改選「現貨」或稍後重試。"
@@ -1099,16 +1105,22 @@ def _load_account_view(profile_id: str) -> AccountView:
 
 def _render_credential_diagnostics(profile: AccountProfile) -> None:
     """金鑰讀取診斷（不顯示金鑰內容）。"""
-    key_env, secret_env = credential_env_names(profile)
+    key_env, secret_env, pass_env = credential_env_names(profile)
     k_stat = credential_status(key_env)
     s_stat = credential_status(secret_env)
-    k_loaded, s_loaded = credentials_for_profile(profile)
+    p_stat = credential_status(pass_env) if pass_env else {"configured": True, "length": 0}
+    k_loaded, s_loaded, p_loaded = credentials_for_profile(profile)
     lines = [
         f"- `{key_env}`：環境變數={'有' if k_stat['configured'] else '無'}"
         f"（len={k_stat['length']}）→ 實際載入={'成功' if k_loaded else '失敗'}",
         f"- `{secret_env}`：環境變數={'有' if s_stat['configured'] else '無'}"
         f"（len={s_stat['length']}）→ 實際載入={'成功' if s_loaded else '失敗'}",
     ]
+    if pass_env:
+        lines.append(
+            f"- `{pass_env}`：環境變數={'有' if p_stat['configured'] else '無'}"
+            f"（len={p_stat['length']}）→ 實際載入={'成功' if p_loaded else '失敗'}"
+        )
     if is_managed_deploy():
         lines.append(
             "- 雲端部署：請確認變數設在 **此 Streamlit 服務**（非僅 runner 服務），"
@@ -1116,6 +1128,8 @@ def _render_credential_diagnostics(profile: AccountProfile) -> None:
         )
     if k_loaded and s_loaded and k_stat["length"] < 20:
         lines.append("- ⚠️ API Key 長度異常偏短，請檢查是否貼錯或截斷。")
+    if pass_env and k_loaded and s_loaded and not p_loaded:
+        lines.append("- ⚠️ OKX 需同時設定 passphrase。")
     with st.expander("金鑰讀取診斷（不含密鑰內容）", expanded=True):
         st.markdown("\n".join(lines))
 
@@ -1327,7 +1341,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             "即時更新頂部數據",
             value=st.session_state.get(f"account_live_{profile_id}", live_default),
             key=f"account_live_{profile_id}",
-            help="每 10 秒向 Binance 拉取餘額與未實現損益（Testnet／實盤）",
+            help=f"每 10 秒向 {exchange_label()} 拉取餘額與未實現損益（Testnet／實盤）",
         )
 
     view = _load_account_view(profile_id)
@@ -1546,7 +1560,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
         _display_account_table(income, "尚無損益紀錄", height=280)
 
 
-def _show_binance_source_banner() -> None:
+def _show_market_source_banner() -> None:
     note = pop_source_note()
     if note:
         st.warning(note, icon="⚠️")
@@ -1595,24 +1609,25 @@ def main() -> None:
             kline_limit,
             universe_df,
         )
-        _show_binance_source_banner()
+        _show_market_source_banner()
 
     with tab_bt:
         strategy_ids = st.session_state.get("active_strategy_ids") or list(STRATEGIES.keys())
         _tab_backtest(strategy_ids, market, kline_limit)
 
+    ex = exchange_label()
     with tab_live:
         _render_account_tab(
             ExecMode.LIVE,
             title="實盤帳戶",
-            caption="Binance 永續主網 API · 策略對照 data/orders/{帳戶}_live.json",
+            caption=f"{ex} 永續主網 API · 策略對照 data/orders/{{帳戶}}_live.json",
         )
 
     with tab_testnet:
         _render_account_tab(
             ExecMode.TESTNET,
             title="Testnet 帳戶",
-            caption="Binance Testnet 永續 API · 策略對照 data/orders/{帳戶}_testnet.json",
+            caption=f"{ex} Demo 永續 API · 策略對照 data/orders/{{帳戶}}_testnet.json",
         )
 
     with tab_paper:

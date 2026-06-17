@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.exchange_config import is_okx
+from core.exchange_bridge import exchange_label
 from core.market_data import (
     BinanceAPIError,
     MarketType,
@@ -56,7 +58,7 @@ def _static_universe(top_n: int, reason: str) -> pd.DataFrame:
     df = pd.DataFrame(rows).reset_index(drop=True)
     df["rank"] = df.index + 1
     _set_source_note(
-        f"無法連線幣安 API（{reason}），已顯示內建常用幣種清單；"
+        f"無法連線 {exchange_label()} API（{reason}），已顯示內建常用幣種清單；"
         "價格需待 API 恢復後更新。"
     )
     return df
@@ -133,7 +135,7 @@ def universe_price_source_label(df: pd.DataFrame) -> str:
         return "未知"
     src: PriceSource = df.iloc[0][_PRICE_SOURCE_COL]  # type: ignore[assignment]
     labels = {
-        "futures": "永續 (fapi)",
+        "futures": "永續 (OKX SWAP)" if is_okx() else "永續 (fapi)",
         "spot": "現貨",
         "spot_mirror": "現貨鏡像",
         "static": "內建清單",

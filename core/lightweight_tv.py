@@ -1,7 +1,7 @@
-"""TradingView 風格圖：Lightweight Charts + 瀏覽端 Binance WebSocket 即時 K 線。
+"""TradingView 風格圖：Lightweight Charts + 瀏覽端 WebSocket 即時 K 線（Binance / OKX）。
 
 初始 K 線與策略 markers 由 Python 注入 JSON；連線後以 WS 增量更新。
-啟用 @aggTrade 時：開盤價與成交量僅跟 @kline_；high/low/close 可隨每笔聚合成交 refinement（仍以 kline 同步整根快照）。
+啟用成交串流時：開盤價與成交量僅跟 K 線 channel；high/low/close 可隨逐筆成交 refinement。
 圖表時間軸固定以台灣時區（Asia/Taipei, UTC+8）顯示。
 需可連線 unpkg CDN（載入 lightweight-charts@5）。
 """
@@ -15,6 +15,8 @@ from typing import Any
 import pandas as pd
 
 import config as cfg
+from core.exchange_config import is_okx
+from core.okx_ws import chart_ws_boot
 from core.market_data import (
     FUTURES_BASE,
     SPOT_BASE,
@@ -240,31 +242,52 @@ def build_lightweight_chart_html(
     price_hdr_style = "" if show_price_header else "display:none;"
 
     if use_live and market == "futures":
-        # 三條獨立 fstream（與現貨相同模式）；合併流在部分環境較易失敗
-        combined = ""
-        sub_params = []
-        ws_url = binance_kline_ws_url(sym, chart_interval, "futures")
-        agg_trade_ws_url = binance_agg_trade_ws_url(sym, "futures")
-        mark_price_ws_url = binance_mark_price_ws_url(sym, "futures")
-        mark_price_note = None
+        if is_okx():
+            combined = ""
+            sub_params = []
+            ws_url = ""
+            agg_trade_ws_url = ""
+            mark_price_ws_url = ""
+            mark_price_note = None
+            okx_ws = chart_ws_boot(sym, chart_interval, market="futures")
+        else:
+            # 三條獨立 fstream（與現貨相同模式）；合併流在部分環境較易失敗
+            combined = ""
+            sub_params = []
+            ws_url = binance_kline_ws_url(sym, chart_interval, "futures")
+            agg_trade_ws_url = binance_agg_trade_ws_url(sym, "futures")
+            mark_price_ws_url = binance_mark_price_ws_url(sym, "futures")
+            mark_price_note = None
+            okx_ws = None
     elif use_live and market == "spot":
         combined = ""
         sub_params = []
-        if not ws_url:
+        okx_ws = None
+        if is_okx():
+            ws_url = ""
+            agg_trade_ws_url = ""
+            mark_price_ws_url = ""
+            mark_price_note = "spot"
+            okx_ws = chart_ws_boot(sym, chart_interval, market="spot")
+        elif not ws_url:
             ws_url = binance_kline_ws_url(sym, chart_interval, "spot")
-        if not agg_trade_ws_url:
+        if not is_okx() and not agg_trade_ws_url:
             agg_trade_ws_url = binance_agg_trade_ws_url(sym, "spot")
-        mark_price_ws_url = ""
-        mark_price_note = mark_price_note or "spot"
+        if not is_okx():
+            mark_price_ws_url = ""
+            mark_price_note = mark_price_note or "spot"
     else:
         combined = ""
         sub_params = []
+        okx_ws = None
         ws_url = ""
         mark_price_ws_url = ""
         agg_trade_ws_url = ""
         mark_price_note = "offline"
 
-    ws_spot_fallback = market == "futures" and allow_spot_ws_fallback()
+    ws_spot_fallback = (
+        market == "futures" and allow_spot_ws_fallback() and not is_okx()
+    )
     spot_agg_fallback = (
         binance_agg_trade_ws_url(sym, "spot") if ws_spot_fallback else ""
     )
@@ -289,11 +312,13 @@ def build_lightweight_chart_html(
         "title": title,
         "chartHeight": chart_height,
         # 方案 D：圖內 client-side REST 輪詢（即使 WS 幀被網路擋掉，最後一根 K 棒/Last 線仍即時跳動）
-        "restTickerUrls": binance_rest_ticker_urls(sym, market) if use_live else [],
+        "restTickerUrls": rest_ticker_urls(sym, market) if use_live else [],
         "restPollMs": 400,
         "barSeconds": _interval_to_seconds(chart_interval),
         "ema150": ema150 or [],
         "ema150Len": cfg.HUNTING_HTF_EMA_LEN,
+        "exchange": "okx" if is_okx() and use_live and okx_ws else "binance",
+        "okx": okx_ws,
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
     title_esc = html.escape(title)
@@ -339,7 +364,7 @@ def build_lightweight_chart_html(
       <span id="markPx" class="flat">—</span>
     </div>
     <div id="tradeRow" style="{price_hdr_style}">
-      <span class="mark-label">最新成交 (aggTrade)</span>
+      <span class="mark-label">最新成交</span>
       <span id="tradePx" class="flat">—</span>
       <span id="aggRate"></span>
     </div>
@@ -486,7 +511,7 @@ def build_lightweight_chart_html(
 
   let markSeries = null;
   let lastTradeSeries = null;
-  if (BOOT.markPriceWsUrl || BOOT.combinedFuturesUrl) {{
+  if (BOOT.markPriceWsUrl || BOOT.combinedFuturesUrl || (BOOT.exchange === 'okx' && BOOT.okx && BOOT.okx.markChannel)) {{
     markSeries = chart.addSeries(LightweightCharts.LineSeries, {{
       color: '#f0b90b',
       lineWidth: 2,
@@ -495,7 +520,7 @@ def build_lightweight_chart_html(
       title: 'Mark',
     }});
   }}
-  if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl) {{
+  if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || BOOT.exchange === 'okx') {{
     lastTradeSeries = chart.addSeries(LightweightCharts.LineSeries, {{
       color: '#29b6f6',
       lineWidth: 1,
@@ -519,7 +544,7 @@ def build_lightweight_chart_html(
     emaChk.checked = false;
   }}
 
-  if (!BOOT.markPriceWsUrl && !BOOT.combinedFuturesUrl) {{
+  if (!BOOT.markPriceWsUrl && !BOOT.combinedFuturesUrl && !(BOOT.exchange === 'okx' && BOOT.okx && BOOT.okx.markChannel)) {{
     markPxEl.style.fontSize = '12px';
     markPxEl.style.fontWeight = '500';
     markPxEl.className = 'flat';
@@ -616,20 +641,27 @@ def build_lightweight_chart_html(
   let klineOk = false;
   let markOk = false;
   let aggOk = false;
+  const isOkx = BOOT.exchange === 'okx' && BOOT.okx;
+
   function statusLine() {{
     const parts = [];
-    if (BOOT.wsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) {{
+    if (isOkx) {{
+      if (BOOT.okx) parts.push('K線 ' + (klineOk ? '✓' : '…'));
+      if (BOOT.okx.markChannel) parts.push('標記價 ' + (markOk ? '✓' : '…'));
+      parts.push('成交 ' + (aggOk ? '✓' : '…'));
+    }} else if (BOOT.wsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) {{
       parts.push('K線 ' + (klineOk ? '✓' : '…'));
     }}
-    if (BOOT.markPriceWsUrl || BOOT.combinedFuturesUrl) {{
+    if (!isOkx && (BOOT.markPriceWsUrl || BOOT.combinedFuturesUrl)) {{
       parts.push('標記價 ' + (markOk ? '✓' : '…'));
     }}
-    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) {{
+    if (!isOkx && (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback)) {{
       parts.push('Agg ' + (aggOk ? '✓' : '…'));
     }}
     if (usingSpotFallback) parts.push('現貨備援 stream.binance.com');
     else if (activeFeedHost) parts.push('行情 ' + activeFeedHost);
-    if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
+    else if (isOkx) parts.push('OKX WS');
+    if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl && !isOkx) {{
       st.textContent = '未設定 WebSocket（僅顯示歷史 K） · ' + TZ_NOTE;
       return;
     }}
@@ -648,9 +680,9 @@ def build_lightweight_chart_html(
     aggEventsThisSecond += 1;
   }}
   function startAggRateTimer() {{
-    if (aggStatTimer || (!BOOT.aggTradeWsUrl && !BOOT.combinedFuturesUrl)) return;
+    if (aggStatTimer || (!BOOT.aggTradeWsUrl && !BOOT.combinedFuturesUrl && !isOkx)) return;
     aggStatTimer = setInterval(() => {{
-      if ((BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) && aggOk) {{
+      if ((BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback || isOkx) && aggOk) {{
         aggRateEl.textContent = aggEventsThisSecond
           ? '(' + aggEventsThisSecond + ' agg/s)'
           : '';
@@ -675,7 +707,7 @@ def build_lightweight_chart_html(
       lastTradeSeries.update({{ time: lastBarTime, value: pendingTradePrice }});
     }}
     if (
-      (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback) &&
+      (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback || isOkx) &&
       currentBarOpen != null &&
       currentBarHigh != null &&
       currentBarLow != null &&
@@ -734,7 +766,7 @@ def build_lightweight_chart_html(
       low: parseFloat(k.l),
       close: parseFloat(k.c),
     }};
-    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback || restUrls.length) {{
+    if (BOOT.aggTradeWsUrl || BOOT.combinedFuturesUrl || usingSpotFallback || restUrls.length || BOOT.exchange === 'okx') {{
       currentBarOpen = candle.open;
       currentBarHigh = candle.high;
       currentBarLow = candle.low;
@@ -978,10 +1010,110 @@ def build_lightweight_chart_html(
     }};
   }}
 
-  if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl) {{
+  if (!BOOT.wsUrl && !BOOT.combinedFuturesUrl && !BOOT.markPriceWsUrl && !BOOT.aggTradeWsUrl && !isOkx) {{
     st.textContent = '未設定 WebSocket（僅顯示歷史 K） · ' + TZ_NOTE;
     tradePxEl.textContent = '（未連線）';
     return;
+  }}
+
+  function okxSubscribe(ws, args) {{
+    ws.send(JSON.stringify({{ op: 'subscribe', args: args }}));
+  }}
+
+  function handleOkxCandleRows(rows) {{
+    if (!rows || !rows.length) return;
+    for (const row of rows) {{
+      if (!row || row.length < 6) continue;
+      handleKlinePayload({{
+        t: parseInt(row[0], 10),
+        o: row[1], h: row[2], l: row[3], c: row[4], v: row[5],
+      }});
+    }}
+  }}
+
+  function handleOkxPublicMsg(msg) {{
+    if (!msg || !msg.arg || !msg.data) return;
+    const ch = msg.arg.channel || '';
+    if (ch === BOOT.okx.tradesChannel) {{
+      for (const t of msg.data) {{
+        if (!t || t.px == null) continue;
+        aggOk = true;
+        startAggRateTimer();
+        const px = parseFloat(t.px);
+        const takerSell = String(t.side || '').toLowerCase() === 'sell';
+        queueAggTrade(px, takerSell);
+      }}
+      statusLine();
+      return;
+    }}
+    if (ch === BOOT.okx.markChannel && BOOT.okx.markChannel) {{
+      for (const m of msg.data) {{
+        if (m && m.markPx != null) {{
+          markOk = true;
+          setMarkDisplay(m.markPx);
+        }}
+      }}
+      statusLine();
+    }}
+  }}
+
+  function connectOkxBusiness() {{
+    if (!isOkx || closed) return;
+    const cfg = BOOT.okx;
+    setActiveFeed(cfg.businessUrl);
+    const ws = new WebSocket(cfg.businessUrl);
+    ws.onopen = () => {{
+      okxSubscribe(ws, [{{ channel: cfg.candleChannel, instId: cfg.instId }}]);
+      statusLine();
+    }};
+    ws.onmessage = (ev) => {{
+      try {{
+        const msg = JSON.parse(ev.data);
+        if (msg.event) return;
+        if (msg.arg && msg.arg.channel === cfg.candleChannel) {{
+          handleOkxCandleRows(msg.data);
+        }}
+      }} catch (e) {{}}
+    }};
+    ws.onclose = () => {{
+      klineOk = false;
+      statusLine();
+      if (!closed) setTimeout(connectOkxBusiness, 3000);
+    }};
+    ws.onerror = () => {{ klineOk = false; statusLine(); }};
+  }}
+
+  function connectOkxPublic() {{
+    if (!isOkx || closed) return;
+    const cfg = BOOT.okx;
+    const args = [{{ channel: cfg.tradesChannel, instId: cfg.instId }}];
+    if (cfg.markChannel) args.push({{ channel: cfg.markChannel, instId: cfg.instId }});
+    setActiveFeed(cfg.publicUrl);
+    const ws = new WebSocket(cfg.publicUrl);
+    ws.onopen = () => {{
+      okxSubscribe(ws, args);
+      statusLine();
+    }};
+    ws.onmessage = (ev) => {{
+      try {{
+        handleOkxPublicMsg(JSON.parse(ev.data));
+      }} catch (e) {{}}
+    }};
+    ws.onclose = () => {{
+      aggOk = false;
+      markOk = false;
+      statusLine();
+      if (!closed) setTimeout(connectOkxPublic, 3000);
+    }};
+    ws.onerror = () => {{ aggOk = false; statusLine(); }};
+  }}
+
+  function parseRestLastPrice(j) {{
+    if (BOOT.exchange === 'okx') {{
+      const row = j.data && j.data[0];
+      return row ? parseFloat(row.last) : NaN;
+    }}
+    return parseFloat(j.price);
   }}
 
   // === 方案 D：圖內 client-side REST 輪詢，推動最後一根 K 棒 + Last 線即時跳動 ===
@@ -1032,7 +1164,7 @@ def build_lightweight_chart_html(
           const r = await fetch(restUrls[idx], {{ cache: 'no-store', mode: 'cors' }});
           if (!r.ok) continue;
           const j = await r.json();
-          const n = parseFloat(j.price);
+          const n = parseRestLastPrice(j);
           if (isFinite(n) && n > 0) {{ restUrlIdx = idx; applyLivePrice(n); break; }}
         }} catch (e) {{}}
       }}
@@ -1042,7 +1174,10 @@ def build_lightweight_chart_html(
   }}
 
   statusLine();
-  if (BOOT.combinedFuturesUrl) {{
+  if (isOkx) {{
+    connectOkxBusiness();
+    connectOkxPublic();
+  }} else if (BOOT.combinedFuturesUrl) {{
     connectFuturesCombined();
   }} else {{
     if (BOOT.wsUrl) connectKline();
@@ -1056,6 +1191,16 @@ def build_lightweight_chart_html(
 }})();
 </script>
 </body></html>"""
+
+
+def rest_ticker_urls(symbol: str, market: MarketType) -> list[str]:
+    """瀏覽器端可直接 fetch 的最新成交價 REST 端點（依 EXCHANGE 分派）。"""
+    if is_okx():
+        from core.okx_ws import inst_id_for_market
+
+        inst = inst_id_for_market(symbol, market)
+        return [f"https://www.okx.com/api/v5/market/ticker?instId={inst}"]
+    return binance_rest_ticker_urls(symbol, market)
 
 
 def binance_rest_ticker_urls(symbol: str, market: MarketType) -> list[str]:
@@ -1079,20 +1224,22 @@ def build_live_price_rest_html(
     *,
     poll_ms: int = 400,
 ) -> str:
-    """方案 B：瀏覽器端每 poll_ms 直接 fetch 幣安 REST 最新成交價。
+    """方案 B：瀏覽器端每 poll_ms 直接 fetch REST 最新成交價（Binance / OKX）。
 
     不經 Streamlit 伺服器（無 rerun、不閃跳），且走每位使用者自己的瀏覽器 IP
     （不吃 Zeabur 共用額度）。REST 為單純 HTTPS 請求/回應，較易穿過會擋 WS
     data frame 的網路；CORS 為 `Access-Control-Allow-Origin: *`。
     """
     sym = symbol.replace("/", "").upper()
-    mkt_label = "永續 fapi" if market == "futures" else "現貨 api"
-    urls = binance_rest_ticker_urls(sym, market)
+    ex = "OKX" if is_okx() else "Binance"
+    mkt_label = f"永續 {ex}" if market == "futures" else f"現貨 {ex}"
+    urls = rest_ticker_urls(sym, market)
 
     boot = {
         "urls": urls,
         "pollMs": max(150, int(poll_ms)),
         "mktLabel": mkt_label,
+        "exchange": "okx" if is_okx() else "binance",
     }
     boot_json = json.dumps(boot, ensure_ascii=False)
 
@@ -1165,7 +1312,9 @@ def build_live_price_rest_html(
         const r = await fetch(BOOT.urls[idx], {{ cache: 'no-store', mode: 'cors' }});
         if (!r.ok) continue;
         const j = await r.json();
-        const n = parseFloat(j.price);
+        const n = (BOOT.exchange === 'okx')
+          ? parseFloat((j.data && j.data[0] && j.data[0].last) || '')
+          : parseFloat(j.price);
         if (isFinite(n) && n > 0) {{
           urlIdx = idx;
           try {{ okHost = new URL(BOOT.urls[idx]).host; }} catch (e) {{ okHost = ''; }}

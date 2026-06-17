@@ -1,4 +1,4 @@
-"""幣安市場資料（公開 API，不需密鑰）。"""
+"""交易所市場資料（公開 API，不需密鑰）；依 EXCHANGE 分派 Binance / OKX。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 import pandas as pd
 import requests
+
+from core.exchange_config import is_okx
 
 MarketType = Literal["futures", "spot"]
 PriceSource = Literal["futures", "spot", "spot_mirror", "static"]
@@ -66,6 +68,9 @@ _FALLBACK_SYMBOLS: tuple[str, ...] = (
 
 class BinanceAPIError(Exception):
     """所有候選端點皆無法取得資料。"""
+
+
+MarketAPIError = BinanceAPIError
 
 
 def strict_futures_only() -> bool:
@@ -129,7 +134,15 @@ def fetch_klines(
     limit: int = 500,
     market: MarketType = "futures",
 ) -> pd.DataFrame:
-    """抓取 OHLCV。market=futures 時優先 fapi/v1/klines（永續）。"""
+    """抓取 OHLCV。market=futures 時優先永續合約 K 線。"""
+    if is_okx() and market == "futures":
+        from core.okx_market_data import OkxAPIError, fetch_klines as okx_klines
+
+        try:
+            return okx_klines(symbol, interval=interval, limit=limit)
+        except OkxAPIError as exc:
+            raise BinanceAPIError(str(exc)) from exc
+
     global _last_kline_source
 
     sym = symbol.replace("/", "").upper()
@@ -213,7 +226,16 @@ def fetch_klines(
 
 
 def fetch_ticker_24h(market: MarketType = "futures") -> tuple[list[dict], PriceSource]:
-    """24h ticker。回傳 (資料, 實際來源)；永續模式優先 fapi/v1/ticker/24hr。"""
+    """24h ticker。回傳 (資料, 實際來源)；永續模式優先合約 ticker。"""
+    if is_okx() and market == "futures":
+        from core.okx_market_data import OkxAPIError, fetch_ticker_24h as okx_tickers
+
+        try:
+            rows, src = okx_tickers()
+            return rows, src  # type: ignore[return-value]
+        except OkxAPIError as exc:
+            raise BinanceAPIError(str(exc)) from exc
+
     if market == "futures":
         candidates = [f"{FUTURES_BASE}/fapi/v1/ticker/24hr"]
         if not strict_futures_only():
@@ -255,7 +277,12 @@ def fetch_ticker_24h(market: MarketType = "futures") -> tuple[list[dict], PriceS
 
 
 def fetch_symbol_last_price(symbol: str, market: MarketType = "futures") -> float:
-    """單一交易對最新成交價（REST）；永續優先 fapi/v1/ticker/price。"""
+    """單一交易對最新成交價（REST）。"""
+    if is_okx() and market == "futures":
+        from core.okx_market_data import fetch_symbol_last_price as okx_last
+
+        return okx_last(symbol)
+
     sym = symbol.replace("/", "").upper()
     params = {"symbol": sym}
 
@@ -331,6 +358,27 @@ def fetch_open_interest_history(
     limit: int = 500,
 ) -> OIFetchResult:
     """永續未平倉量歷史；與 K 線 datetime 對齊後使用。"""
+    if is_okx():
+        from core.okx_market_data import fetch_open_interest_history as okx_oi
+
+        series, ok, error, count = okx_oi(symbol, interval, limit=limit)
+        sym = symbol.replace("/", "").upper()
+        period_map = {
+            "1m": "5m", "3m": "5m", "5m": "5m", "15m": "15m",
+            "30m": "30m", "1h": "1H", "2h": "2H", "4h": "4H",
+            "6h": "6H", "12h": "12H", "1d": "1D",
+        }
+        period = period_map.get(interval, "5m")
+        return OIFetchResult(
+            series=series,
+            ok=ok,
+            error=error,
+            fetched_count=count,
+            symbol=sym,
+            period=period,
+            source="okx:/rubik/stat/contracts/open-interest-history",
+        )
+
     period_map = {
         "1m": "5m", "3m": "5m", "5m": "5m", "15m": "15m",
         "30m": "30m", "1h": "1h", "2h": "2h", "4h": "4h",

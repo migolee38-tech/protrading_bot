@@ -10,8 +10,12 @@ import pandas as pd
 
 from core.backtest_pnl import profit_factor_from_pnls
 from core.account_profiles import AccountProfile, load_profile, profile_capital
-from core.binance_credentials import ExecMode, credentials_configured, credentials_hint
-from core.binance_futures import FuturesSettings, create_client, fetch_open_algo_orders
+from core.binance_credentials import ExecMode, mode_label
+from core.exchange_bridge import (
+    credentials_configured,
+    credentials_hint,
+)
+from core.futures_execution import create_futures_clients, settings_for_profile
 from core.order_tags import strategy_name_from_client_order_id
 
 
@@ -73,6 +77,12 @@ def _ms_to_iso(ms: Any) -> str:
 
 
 def _format_api_error(exc: Exception) -> str:
+    from core.exchange_config import is_okx
+
+    if is_okx():
+        from core.okx_account import format_okx_api_error
+
+        return format_okx_api_error(exc)
     code = getattr(exc, "error_code", None)
     msg = getattr(exc, "error_message", None) or str(exc)
     if code is not None:
@@ -687,6 +697,15 @@ def _fetch_all_open_orders(client: Any, symbols: set[str]) -> list[dict]:
     binance-futures-connector 的 get_open_orders(symbol) 為單筆查詢；
     get_orders() 對應 GET /fapi/v1/openOrders，可不帶 symbol。
     """
+    from core.exchange_config import is_okx
+
+    if is_okx():
+        from core.okx_account import fetch_all_open_orders as okx_open
+
+        return okx_open(client, symbols)
+
+    from core.binance_futures import fetch_open_algo_orders
+
     rows: list[dict] = []
     try:
         part = client.get_orders()
@@ -758,6 +777,38 @@ def fetch_live_headline_for_profile(profile: AccountProfile) -> AccountHeadline:
         return empty
 
     try:
+        settings = settings_for_profile(profile)
+        clients = create_futures_clients(settings)
+        from core.exchange_config import is_okx
+
+        if is_okx():
+            from core.okx_account import (
+                fetch_all_open_orders,
+                fetch_wallet_balances,
+                positions_as_binance_rows,
+            )
+
+            wallet, available = fetch_wallet_balances(clients)
+            positions = _positions_df(positions_as_binance_rows(clients))
+            unrealized = float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
+            lev = weighted_position_leverage(positions)
+            symbols = (
+                set(positions["symbol"].astype(str).str.upper())
+                if not positions.empty
+                else set()
+            )
+            open_count = len(fetch_all_open_orders(clients, symbols))
+            return AccountHeadline(
+                wallet_balance=wallet,
+                available_balance=available,
+                unrealized_pnl=unrealized,
+                weighted_leverage=lev,
+                position_count=len(positions),
+                open_order_count=open_count,
+            )
+
+        from core.binance_futures import FuturesSettings, create_client
+
         settings = FuturesSettings.from_profile(profile)
         client = create_client(settings)
         acct = client.account()
@@ -839,7 +890,7 @@ def fetch_futures_account(
     trade_limit_per_symbol: int = 50,
     income_limit: int = 200,
 ) -> AccountView:
-    """從 Binance 永續 API 拉取 testnet / live 帳戶。"""
+    """從永續 API 拉取 testnet / live 帳戶（Binance / OKX）。"""
     profile = load_profile(account_id, mode)
     empty = AccountView(
         mode=mode.value,
@@ -867,14 +918,121 @@ def fetch_futures_account(
         return empty
 
     warnings: list[str] = []
+    bot_orders = bot_orders_for_profile(profile)
+
+    from core.exchange_config import is_okx
+
+    if is_okx():
+        try:
+            settings = settings_for_profile(profile)
+            clients = create_futures_clients(settings)
+        except Exception as e:
+            empty.error = _format_api_error(e)
+            return empty
+
+        from core.okx_account import (
+            fetch_account_trades,
+            fetch_all_open_orders,
+            fetch_income_history,
+            fetch_orders_by_symbol,
+            fetch_wallet_balances,
+            positions_as_binance_rows,
+        )
+
+        try:
+            wallet, available = fetch_wallet_balances(clients)
+        except Exception as e:
+            empty.error = f"帳戶讀取失敗: {_format_api_error(e)}"
+            return empty
+
+        try:
+            positions = _positions_df(positions_as_binance_rows(clients))
+        except Exception as e:
+            warnings.append(f"持倉讀取失敗: {_format_api_error(e)}")
+            positions = pd.DataFrame()
+
+        symbols = _collect_symbols(positions, pd.DataFrame(), pd.DataFrame(), bot_orders)
+
+        try:
+            open_orders = _open_orders_df(_fetch_all_open_orders(clients, symbols))
+            open_orders = attach_leverage_to_orders(open_orders, positions, bot_orders)
+            open_orders = attach_entry_meta_to_orders(open_orders, positions)
+        except Exception as e:
+            warnings.append(f"掛單讀取失敗: {_format_api_error(e)}")
+            open_orders = pd.DataFrame()
+
+        try:
+            income = _income_df(fetch_income_history(clients, income_limit=income_limit))
+        except Exception as e:
+            warnings.append(f"損益紀錄讀取失敗: {_format_api_error(e)}")
+            income = pd.DataFrame()
+        income_sum = summarize_income(income)
+
+        symbols = _collect_symbols(positions, open_orders, income, bot_orders)
+        orders_by_symbol = fetch_orders_by_symbol(clients, symbols)
+        order_cid_map = _order_cid_map_from_orders(orders_by_symbol)
+        positions = attach_strategy_to_positions(positions, orders_by_symbol, bot_orders)
+        symbol_strategy = _symbol_strategy_from_positions(positions)
+
+        try:
+            trade_rows = fetch_account_trades(
+                clients, symbols, trade_limit_per_symbol=trade_limit_per_symbol
+            )
+        except Exception as e:
+            warnings.append(f"成交讀取失敗: {_format_api_error(e)}")
+            trade_rows = []
+        if not symbols:
+            warnings.append(
+                "無法判定交易對，成交明細為空（需有持倉、掛單或損益紀錄中的 symbol）。"
+            )
+        trades = _aggregate_trades_by_order(trade_rows, order_cid_map)
+        trades = attach_leverage_and_strategy_to_trades(
+            trades,
+            positions,
+            bot_orders,
+            order_cid_map=order_cid_map,
+            symbol_strategy=symbol_strategy,
+        )
+        if not open_orders.empty and "client_order_id" in open_orders.columns:
+            open_orders["strategy_name"] = open_orders["client_order_id"].map(
+                lambda cid: strategy_name_from_client_order_id(str(cid or ""))
+            )
+
+        win_rate, pf = compute_trade_stats(trades)
+        strategy_stats = merge_strategy_performance(trades, positions)
+        unrealized = float(positions["unrealized_pnl"].sum()) if not positions.empty else 0.0
+
+        return AccountView(
+            mode=mode.value,
+            account_id=profile.account_id,
+            account_label=profile.label,
+            wallet_balance=wallet,
+            available_balance=available,
+            unrealized_pnl=unrealized,
+            weighted_leverage=weighted_position_leverage(positions),
+            win_rate=win_rate,
+            profit_factor=pf,
+            realized_pnl=income_sum["realized_pnl"],
+            commission=income_sum["commission"],
+            funding=income_sum["funding"],
+            position_count=len(positions),
+            open_order_count=len(open_orders),
+            positions=positions,
+            open_orders=open_orders,
+            trades=trades,
+            income=income,
+            strategy_stats=strategy_stats,
+            warnings=warnings,
+        )
+
     try:
+        from core.binance_futures import FuturesSettings, create_client
+
         settings = FuturesSettings.from_profile(profile)
         client = create_client(settings)
     except Exception as e:
         empty.error = _format_api_error(e)
         return empty
-
-    bot_orders = bot_orders_for_profile(profile)
 
     try:
         acct = client.account()

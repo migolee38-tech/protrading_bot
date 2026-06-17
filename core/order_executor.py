@@ -17,22 +17,25 @@ from core.account_profiles import (
     _LEGACY_ORDERS,
     load_profile,
     orders_file_for_profile,
-    profile_configured,
 )
-from core.binance_credentials import ExecMode, credentials_hint, mode_label
-from core.binance_futures import (
-    FuturesSettings,
-    _round_qty,
-    _symbol_filters,
+from core.binance_credentials import ExecMode, credentials_hint
+from core.exchange_bridge import profile_configured
+from core.exchange_config import is_okx
+from core.futures_execution import (
     calc_order_quantity,
-    create_client,
-    ensure_tradable_symbol,
-    format_binance_error,
+    create_futures_clients,
+    ensure_symbol_tradable,
+    fetch_entry_fill_price,
+    format_futures_error,
+    place_market_entry,
     resolve_leverage,
+    settings_for_profile,
 )
+from core.account_profiles import credentials_for_profile as binance_credentials_for_profile
+from core.okx_credentials import credentials_for_profile as okx_credentials_for_profile
 from risk import TradePlan, recalc_plan_for_fill
 from core.position_manager import manage_positions_for_profile, register_live_position
-from core.order_tags import build_client_order_id
+from core.order_tags import build_client_order_id, build_okx_client_order_id
 from core.market_data import MarketType, fetch_klines
 from core.strategy_registry import get_strategy, scan_signals_for, with_symbol
 
@@ -180,21 +183,38 @@ def _plan_from_request(req: OrderRequest, qty: float) -> TradePlan:
     return recalc_plan_for_fill(stub, req.entry, req.strategy_id)
 
 
+def _credentials_hint(mode: ExecMode | str, account_id: str) -> str:
+    if is_okx():
+        from core.okx_credentials import credentials_hint as okx_hint
+
+        return okx_hint(mode, account_id)
+    return credentials_hint(mode, account_id)
+
+
 def place_futures_order(req: OrderRequest) -> dict:
     """永續合約下單（testnet 或 live）。"""
     if req.mode not in (OrderMode.TESTNET, OrderMode.LIVE):
         raise ValueError("place_futures_order 僅支援 testnet / live")
 
     profile = req.profile
-    settings = FuturesSettings.from_profile(profile, leverage=req.leverage)
-    if not settings.api_key or not settings.api_secret:
-        raise ValueError(credentials_hint(req.mode, req.account_id))
+    settings = settings_for_profile(profile, leverage=req.leverage)
+    if is_okx():
+        key, secret, passphrase = okx_credentials_for_profile(profile)
+        if not key or not secret or not passphrase:
+            raise ValueError(_credentials_hint(req.mode, req.account_id))
+    else:
+        key, secret = binance_credentials_for_profile(profile)
+        if not key or not secret:
+            raise ValueError(_credentials_hint(req.mode, req.account_id))
 
-    client = create_client(settings)
-    lev = resolve_leverage(client, req.symbol.replace("/", "").upper(), settings)
+    clients = create_futures_clients(settings)
+    sym = req.symbol.replace("/", "").upper()
+    lev = resolve_leverage(clients, sym, settings)
     qty = req.quantity
     if qty <= 0:
         qty = calc_order_quantity(
+            clients=clients,
+            symbol=sym,
             entry=req.entry,
             position_size=0,
             strategy_id=req.strategy_id,
@@ -202,32 +222,27 @@ def place_futures_order(req: OrderRequest) -> dict:
             leverage=lev,
         )
 
-    sym = req.symbol.replace("/", "").upper()
-    ensure_tradable_symbol(client, sym, testnet=settings.testnet)
-    client_order_id = build_client_order_id(req.strategy_id, sym)
+    ensure_symbol_tradable(clients, sym, testnet=settings.testnet)
+    client_order_id = (
+        build_okx_client_order_id(req.strategy_id, sym)
+        if is_okx()
+        else build_client_order_id(req.strategy_id, sym)
+    )
 
-    order_side = "BUY" if req.side == "long" else "SELL"
     try:
-        client.change_leverage(symbol=sym, leverage=lev)
+        entry_result = place_market_entry(
+            clients,
+            symbol=sym,
+            side=req.side,
+            quantity=qty,
+            client_order_id=client_order_id,
+        )
     except Exception as e:
-        log.warning(f"{sym} 設定槓桿失敗: {format_binance_error(e)}")
+        raise ValueError(f"{sym} 市價進場失敗: {format_futures_error(e)}") from e
 
-    lot_step, _ = _symbol_filters(client, sym)
-    qty = _round_qty(qty, lot_step)
-    if qty <= 0:
-        raise ValueError(f"{sym} 計算數量為 0")
-
-    entry_kwargs: dict = {
-        "symbol": sym,
-        "side": order_side,
-        "type": "MARKET",
-        "quantity": qty,
-        "newClientOrderId": client_order_id,
-    }
-    try:
-        entry_result = client.new_order(**entry_kwargs)
-    except Exception as e:
-        raise ValueError(f"{sym} 市價進場失敗: {format_binance_error(e)}") from e
+    fill_px = fetch_entry_fill_price(clients, sym, entry_result)
+    if fill_px > 0:
+        entry_result["avgPrice"] = fill_px
 
     plan = _plan_from_request(req, qty)
     protection_error: str | None = None
@@ -235,17 +250,19 @@ def place_futures_order(req: OrderRequest) -> dict:
     try:
         live_state = register_live_position(
             profile,
-            client,
+            clients,
             strategy_id=req.strategy_id,
             symbol=sym,
             side=req.side,
             plan=plan,
             quantity=qty,
             entry_result=entry_result,
-            exchange_order_id=str(entry_result.get("orderId", "")),
+            exchange_order_id=str(
+                entry_result.get("orderId") or entry_result.get("ordId") or ""
+            ),
         )
     except Exception as e:
-        protection_error = format_binance_error(e)
+        protection_error = format_futures_error(e)
         log.error(f"{sym} 持倉登記/保護單失敗: {protection_error}")
 
     row = req.to_dict()
@@ -256,8 +273,12 @@ def place_futures_order(req: OrderRequest) -> dict:
         row["error"] = protection_error
     else:
         row["status"] = "filled_testnet" if req.mode == OrderMode.TESTNET else "filled_live"
-    row["exchange_order_id"] = entry_result.get("orderId")
-    row["client_order_id"] = entry_result.get("clientOrderId") or client_order_id
+    row["exchange_order_id"] = entry_result.get("orderId") or entry_result.get("ordId")
+    row["client_order_id"] = (
+        entry_result.get("clientOrderId")
+        or entry_result.get("clOrdId")
+        or client_order_id
+    )
     if live_state and live_state.stop_algo_id:
         row["stop_algo_id"] = live_state.stop_algo_id
     if live_state and live_state.tp_algo_ids:
@@ -389,7 +410,7 @@ def scan_and_execute(
 
     profile = load_profile(account_id, order_mode.value)
     if order_mode != OrderMode.PAPER and not profile_configured(profile):
-        raise ValueError(credentials_hint(order_mode, account_id))
+        raise ValueError(_credentials_hint(order_mode, account_id))
 
     placed: list[dict] = []
     for sym in symbols:
@@ -408,13 +429,13 @@ def scan_and_execute(
                 placed.append(place_order(req, market=market))
             except Exception as e:
                 log.error(
-                    f"{profile.display_name} 下單失敗 {bin_sym} {sid}: {format_binance_error(e)}"
+                    f"{profile.display_name} 下單失敗 {bin_sym} {sid}: {format_futures_error(e)}"
                 )
     if order_mode != OrderMode.PAPER:
         try:
             manage_positions_for_profile(profile)
         except Exception as e:
-            log.error(f"{profile.display_name} 持倉管理失敗: {format_binance_error(e)}")
+            log.error(f"{profile.display_name} 持倉管理失敗: {format_futures_error(e)}")
     return placed
 
 
