@@ -99,7 +99,11 @@ def fetch_ticker_24h() -> tuple[list[dict], str]:
         if last <= 0:
             continue
         pct = ((last - open24) / open24 * 100.0) if open24 > 0 else 0.0
-        qv = float(row.get("volCcy24h") or row.get("vol24h") or 0)
+        # USDT 本位 SWAP：volCcy24h 為基礎幣數量，非 USDT 成交額；與 Binance quoteVolume 對齊用 last 換算
+        vol_base = float(row.get("volCcy24h") or 0)
+        qv = vol_base * last if vol_base > 0 else 0.0
+        if qv <= 0:
+            continue
         out.append(
             {
                 "symbol": sym,
