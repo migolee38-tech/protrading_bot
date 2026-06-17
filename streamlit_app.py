@@ -49,12 +49,21 @@ from core.account_profiles import (
     profile_from_id,
 )
 from core.binance_credentials import ExecMode, mode_label
+from core.exchange_config import is_okx
 from core.exchange_bridge import (
+    active_exchange_id,
+    chart_server_poll_caption,
+    chart_server_poll_label,
+    chart_ws_hint,
     credential_env_names,
     credentials_configured,
     credentials_for_profile,
     credentials_hint,
     exchange_label,
+    futures_universe_label,
+    kline_source_mismatch_warning,
+    market_fetch_error_hint,
+    universe_fallback_hint,
 )
 from core.futures_account import (
     AccountHeadline,
@@ -156,7 +165,7 @@ def _klines_for_chart(
     *,
     live_futures_server: bool,
 ) -> tuple[pd.DataFrame, str]:
-    """永續即時模式由伺服器輪詢 fapi（Zeabur 可用）；其餘走快取。"""
+    """永續即時模式由伺服器輪詢 REST（Zeabur 可用）；其餘走快取。"""
     if live_futures_server:
         df = fetch_klines(symbol, interval=interval, limit=limit, market=market)
         return df, str(df.attrs.get("price_source", market))
@@ -262,6 +271,20 @@ def _strategy_order_hints(
     }
 
 
+def _sidebar_exchange_badge() -> None:
+    """顯示目前 EXCHANGE 設定，方便雲端除錯。"""
+    ex_id = active_exchange_id()
+    label = exchange_label()
+    if ex_id == "okx":
+        st.sidebar.success(f"交易所：**{label}**（`EXCHANGE=okx`）")
+    else:
+        st.sidebar.caption(f"交易所：**{label}**（`EXCHANGE={ex_id}`）")
+        if is_managed_deploy():
+            st.sidebar.caption(
+                "切換 OKX：於**此 Streamlit 服務** Variables 設 `EXCHANGE=okx` 後 Redeploy。"
+            )
+
+
 def _sidebar_clear_trade_data() -> None:
     if _startup_cleared:
         st.sidebar.success(
@@ -286,6 +309,7 @@ def _sidebar_clear_trade_data() -> None:
 def _sidebar_panel(market: MarketType) -> tuple[int, int, pd.DataFrame]:
     """側欄由上而下：Top 100 表 → 成交量滑桿 → K 線根數滑桿。"""
     render_logout_control()
+    _sidebar_exchange_badge()
     _sidebar_clear_trade_data()
     st.sidebar.markdown("### 📊 Top 100")
 
@@ -323,13 +347,8 @@ def _sidebar_panel(market: MarketType) -> tuple[int, int, pd.DataFrame]:
             f"共 {len(universe_df)} 檔 · {'永續' if market == 'futures' else '現貨'} · "
             f"榜單行情：{src_lbl} · 點選列切換 K 線"
         )
-        if market == "futures" and src_lbl != "永續 (fapi)":
-            st.sidebar.warning(
-                "目前 Top 100 並非永續 fapi 報價。"
-                "亞洲主機可在 Zeabur 變數設 BINANCE_STRICT_FUTURES=1 強制僅用永續；"
-                "或點「重新抓取榜單」。",
-                icon="⚠️",
-            )
+        if market == "futures" and src_lbl != futures_universe_label():
+            st.sidebar.warning(universe_fallback_hint(), icon="⚠️")
 
     top_n = st.sidebar.slider(
         "成交量 Top N",
@@ -442,7 +461,8 @@ def _top_toolbar(universe_df: pd.DataFrame) -> tuple[list[str], str, str, Market
         st.session_state.market = market
 
     with c7:
-        use_live = st.checkbox("WS 即時", value=True, key="toolbar_use_ws")
+        ws_chk = f"{chart_ws_hint()} 即時" if market == "futures" else "WS 即時"
+        use_live = st.checkbox(ws_chk, value=True, key="toolbar_use_ws")
 
     sym = st.session_state.selected_symbol
     return strategy_ids, chart_highlight, sym, market, chart_tf, use_live
@@ -844,15 +864,13 @@ def _render_chart_block(
     *,
     live_futures_server: bool,
 ) -> pd.DataFrame:
-    """繪製 K 線圖；live_futures_server 時由伺服器刷新 fapi，不用瀏覽器 fstream。"""
+    """繪製 K 線圖；live_futures_server 時由伺服器輪詢 REST，不用瀏覽器 WebSocket。"""
     raw, k_src = _klines_for_chart(
         sym, chart_tf, kline_limit, market, live_futures_server=live_futures_server
     )
-    if market == "futures" and k_src and k_src != "futures":
-        st.warning(
-            f"歷史 K 線來源為「{k_src}」，非永續 fapi；與合約即時價可能不一致。",
-            icon="⚠️",
-        )
+    k_warn = kline_source_mismatch_warning(k_src)
+    if market == "futures" and k_warn:
+        st.warning(k_warn, icon="⚠️")
     candles, volumes = df_to_tv_series(raw)
     ema150 = df_to_ema_line(raw)
     markers: list[dict] = []
@@ -868,9 +886,11 @@ def _render_chart_block(
 
     mkt_label = "永續" if market == "futures" else "現貨"
     if live_futures_server:
-        ws_label = "fapi 輪詢"
+        ws_label = chart_server_poll_label()
+    elif use_live:
+        ws_label = chart_ws_hint()
     else:
-        ws_label = "WS" if use_live else "離線"
+        ws_label = "離線"
     title = f"{pair} · {chart_tf} · 高亮 {hi_name} · {mkt_label} · {ws_label}"
 
     browser_ws = use_live
@@ -889,10 +909,7 @@ def _render_chart_block(
     )
     components.html(html_doc, height=640, scrolling=False)
     if live_futures_server:
-        st.caption(
-            "永續即時：伺服器每 2 秒更新 fapi K 線與收盤價"
-            "（瀏覽器無法連 fstream 時改走此路徑，與 TV USDT.P 同源）"
-        )
+        st.caption(chart_server_poll_caption())
     return raw
 
 
@@ -946,7 +963,7 @@ def _main_workstation(
             _show_market_source_banner()
             st.error(
                 f"無法載入圖表：{exc}\n\n"
-                "若無法連幣安，請改選「現貨」或稍後重試。"
+                f"{market_fetch_error_hint()}"
             )
 
 
@@ -1364,7 +1381,7 @@ def _render_account_tab(mode: ExecMode, *, title: str, caption: str) -> None:
             st.info(
                 f"📊 績效自 **{view.stats_reset_at}** 起算；"
                 "較早成交已隱藏，**持倉不受影響**。"
-                "（Binance 歷史仍在交易所，僅網站不計入統計）"
+                f"（{exchange_label()} 歷史仍在交易所，僅網站不計入統計）"
             )
         with rs_btn:
             if st.button("恢復全部歷史", key=f"clear_stats_reset_{profile_id}"):

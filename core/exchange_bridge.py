@@ -79,6 +79,63 @@ def exchange_label() -> str:
     return "OKX" if is_okx() else "Binance"
 
 
+def active_exchange_id() -> str:
+    from core.exchange_config import active_exchange
+
+    return active_exchange()
+
+
+def futures_universe_label() -> str:
+    """榜單／K 線預期的永續行情來源標籤。"""
+    return "永續 (OKX SWAP)" if is_okx() else "永續 (fapi)"
+
+
+def chart_ws_hint() -> str:
+    if is_okx():
+        return "OKX WS"
+    return "Binance WS"
+
+
+def chart_server_poll_label() -> str:
+    return "OKX REST" if is_okx() else "fapi 輪詢"
+
+
+def chart_server_poll_caption() -> str:
+    if is_okx():
+        return (
+            "永續即時：伺服器輪詢 OKX REST K 線與最新價"
+            "（瀏覽器無法連 OKX WebSocket 時的備援）"
+        )
+    return (
+        "永續即時：伺服器每 2 秒更新 fapi K 線與收盤價"
+        "（瀏覽器無法連 fstream 時改走此路徑，與 TV USDT.P 同源）"
+    )
+
+
+def universe_fallback_hint() -> str:
+    if is_okx():
+        return "目前 Top 100 並非 OKX 永續 SWAP 報價。請點「重新抓取榜單」或確認 EXCHANGE=okx。"
+    return (
+        "目前 Top 100 並非永續 fapi 報價。"
+        "亞洲主機可在 Zeabur 變數設 BINANCE_STRICT_FUTURES=1 強制僅用永續；"
+        "或點「重新抓取榜單」。"
+    )
+
+
+def kline_source_mismatch_warning(k_src: str) -> str | None:
+    if not k_src or k_src == "futures":
+        return None
+    return (
+        f"歷史 K 線來源為「{k_src}」，非 {futures_universe_label()}；"
+        "與合約即時價可能不一致。"
+    )
+
+
+def market_fetch_error_hint() -> str:
+    ex = exchange_label()
+    return f"若無法連 {ex}，請改選「現貨」、確認 EXCHANGE 與 API 變數，或稍後重試。"
+
+
 def futures_settings_from_profile(
     profile: AccountProfile,
     *,

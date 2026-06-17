@@ -8,8 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from core.exchange_config import is_okx
-from core.exchange_bridge import exchange_label
+from core.exchange_bridge import exchange_label, futures_universe_label
 from core.market_data import (
     BinanceAPIError,
     MarketType,
@@ -135,7 +134,7 @@ def universe_price_source_label(df: pd.DataFrame) -> str:
         return "未知"
     src: PriceSource = df.iloc[0][_PRICE_SOURCE_COL]  # type: ignore[assignment]
     labels = {
-        "futures": "永續 (OKX SWAP)" if is_okx() else "永續 (fapi)",
+        "futures": futures_universe_label(),
         "spot": "現貨",
         "spot_mirror": "現貨鏡像",
         "static": "內建清單",
