@@ -2,7 +2,27 @@
 
 Zeabur 伺服器可選 **新加坡** 等亞洲區域，較容易直連 `fapi.binance.com`（永續 REST），避免 Streamlit Cloud（美國）常見的 **HTTP 451**。
 
-本專案已包含 **`Dockerfile`**，Zeabur 會自動用 Docker 建置。
+本專案含 **`Dockerfile`**（Streamlit 儀表板）與 **`Dockerfile.runner`**（24/7 自動交易）。Zeabur 依**服務名稱**自動選擇 Dockerfile。
+
+---
+
+## 雙服務架構（建議）
+
+| Zeabur 服務 | Dockerfile | 啟動 | 網域 |
+|-------------|------------|------|------|
+| **服務 1**（例如 `protrading`） | `Dockerfile` | Streamlit | ✅ 綁 `*.zeabur.app` |
+| **服務 2**（命名 **`runner`**） | `Dockerfile.runner` | `live_runner.py` | ❌ 不綁網域 |
+
+> 若網域綁到 `live_runner` 服務會出現 **502**（worker 不監聽 HTTP Port）。
+
+### 建立服務 2（runner）
+
+1. 同一 Project → **Add Service** → **Git** → 同一 repo  
+2. **服務名稱設為 `runner`**（Zeabur 會自動用 `Dockerfile.runner`）  
+3. Variables 設 `EXCHANGE=okx`、`RUNNER_PROFILES`、`OKX_*_TESTNET_*` 等（見 `.env.example`）  
+4. **不要**綁公開網域；以 **Logs** 確認 `🚀 多帳戶自動交易啟動`
+
+服務 1 與服務 2 的 Variables **各自獨立設定**（Save 後 Redeploy）。
 
 ---
 
@@ -39,13 +59,17 @@ git push
 4. 專案內 **Add Service** → **Git**  
 5. 選擇 repository：`migolee38-tech/protrading_bot`  
 6. **Root Directory**：留空（repo 根即應用根）  
-7. 建置方式：偵測到 **`Dockerfile`** 後使用 Docker 建置（無需另填啟動指令）
+7. 建置方式：偵測到 **`Dockerfile`** 後使用 Docker 建置（Streamlit；無需另填啟動指令）  
+8. 綁定網域（例如 `protrading.zeabur.app`）於**此 Streamlit 服務**  
+9. 需要自動交易時，再 **Add Service** 並命名 **`runner`**（見上方「雙服務架構」）
 
 ---
 
 ## 步驟 3：環境變數（Zeabur → Variables）
 
-### 登入密碼（建議必設，無需升級 Zeabur 方案）
+### 服務 1（Streamlit 儀表板）
+
+#### 登入密碼（建議必設，無需升級 Zeabur 方案）
 
 | 變數 | 說明 |
 |------|------|
@@ -54,7 +78,26 @@ git push
 
 未設定 `APP_LOGIN_PASSWORD` 時，網站**不會**要求登入（僅適合本機測試）。
 
-### 幣安 API（選用）
+#### OKX / 交易所（儀表板看盤、帳戶）
+
+| 變數 | 說明 |
+|------|------|
+| `EXCHANGE` | `okx` 或 `binance`（預設 binance） |
+| `OKX_ACCOUNT1_TESTNET_*` | 看 Demo 帳戶時需要（Key / Secret / Passphrase） |
+
+### 服務 2（runner，自動交易）
+
+| 變數 | 說明 |
+|------|------|
+| `EXCHANGE` | **`okx`**（或 binance） |
+| `RUNNER_PROFILES` | 例如 `account1:testnet,account2:testnet` |
+| `OKX_ACCOUNT1_TESTNET_API_KEY` 等 | Demo 金鑰三件套 × 各帳戶 |
+| `TRADING_ACCOUNTS` | `account1,account2` |
+
+勿在 runner 服務設 `ZBPACK_START_COMMAND` 覆寫成 `--verify-only`（驗完即退出）。  
+`APP_LOGIN_PASSWORD` 僅 Streamlit 需要，runner 不必設。
+
+### 幣安 API（選用，`EXCHANGE=binance` 時）
 
 僅 **實盤下單** 需要；公開行情、回測、模擬下單不需 API。
 
@@ -83,13 +126,20 @@ git push
 
 ## 本機用 Docker 試跑（選用）
 
+**儀表板：**
+
 ```bash
 cd trading-bot
 docker build -t protrading-bot .
 docker run --rm -p 8501:8501 -e PORT=8501 protrading-bot
 ```
 
-瀏覽器開 http://localhost:8501
+**自動交易 worker：**
+
+```bash
+docker build -f Dockerfile.runner -t protrading-runner .
+docker run --rm --env-file .env protrading-runner
+```
 
 ---
 
@@ -110,7 +160,7 @@ docker run --rm -p 8501:8501 -e PORT=8501 protrading-bot
 | 問題 | 處理 |
 |------|------|
 | Build 失敗 | 看 Zeabur Build Log；確認 `requirements.txt` 在 repo 根目錄 |
-| 502 / 無法開啟 | 確認 Dockerfile `CMD` 使用 `0.0.0.0` 與 `$PORT` |
+| 502 / 無法開啟 | 網域須綁 **Streamlit 服務**；`Dockerfile` 須跑 streamlit 並監聽 `0.0.0.0:$PORT`；勿把網域綁到 `runner` |
 | 中文方塊 | 確認映像含 `fonts-noto-cjk`（本 Dockerfile 已含） |
 | 仍 451 | 確認區域為新加坡；Logs 是否仍打 `fapi.binance.com` 失敗 |
 | 更新程式 | `git push` 後 Zeabur 通常自動重新部署 |
@@ -127,7 +177,8 @@ docker run --rm -p 8501:8501 -e PORT=8501 protrading-bot
 
 | 檔案 | 用途 |
 |------|------|
-| `Dockerfile` | Zeabur 建置與啟動 Streamlit |
+| `Dockerfile` | Zeabur **服務 1**：Streamlit 儀表板 |
+| `Dockerfile.runner` | Zeabur **服務 `runner`**：live_runner 自動交易 |
 | `.dockerignore` | 排除 `.venv`、`.env`、`data/cache` 等 |
 | `core/app_auth.py` | 登入閘道（`APP_LOGIN_*` 環境變數） |
 | `streamlit_app.py` | 應用進入點 |
