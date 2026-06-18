@@ -38,10 +38,11 @@ from core.binance_credentials import ExecMode, mode_label
 from core.exchange_bridge import (
     format_exchange_error,
     futures_settings_from_profile,
+    is_transient_exchange_error,
     profile_configured,
     verify_futures_connection,
 )
-from core.exchange_config import active_exchange
+from core.exchange_config import active_exchange, is_okx
 from core.market_data import MarketType, fetch_klines
 from core.order_executor import OrderMode, OrderRequest, place_order
 from core.position_manager import manage_positions_for_profile
@@ -50,6 +51,7 @@ from core.universe import top_usdt_pairs_by_volume
 
 _LOG_FILE = Path(__file__).resolve().parent / "logs" / "live_runner.log"
 _ALL_STRATEGY_IDS = list(STRATEGIES.keys())
+_TRANSIENT_ORDER_COOLDOWN_SEC = 180
 
 log = logging.getLogger("LiveRunner")
 
@@ -143,6 +145,8 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
     order_mode = OrderMode(cfg.profile.network.value)
     state = _load_state(cfg.profile)
     executed: dict[str, str] = state.setdefault("executed", {})
+    cooldowns: dict[str, float] = state.setdefault("cooldowns", {})
+    now = time.time()
     placed: list[dict] = []
     assert cfg.futures is not None
 
@@ -172,6 +176,8 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
 
             key = _signal_key(sid, bin_sym, last.bar_index)
             if key in executed:
+                continue
+            if float(cooldowns.get(key, 0) or 0) > now:
                 continue
 
             plan = last.plan
@@ -207,10 +213,16 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
                     f"[{cfg.profile.display_name}] {sid} {bin_sym} 下單失敗: "
                     f"{format_exchange_error(e)}"
                 )
+                if is_transient_exchange_error(e):
+                    cooldowns[key] = time.time() + _TRANSIENT_ORDER_COOLDOWN_SEC
 
     if len(executed) > 5000:
         executed = dict(list(executed.items())[-3000:])
+    if len(cooldowns) > 5000:
+        cutoff = time.time() - _TRANSIENT_ORDER_COOLDOWN_SEC
+        cooldowns = {k: v for k, v in cooldowns.items() if float(v) > cutoff}
     state["executed"] = executed
+    state["cooldowns"] = cooldowns
     _save_state(cfg.profile, state)
 
     if order_mode != OrderMode.PAPER:
@@ -223,7 +235,9 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
 
 def _scan_round(cfg: RunnerConfig) -> list[dict]:
     placed: list[dict] = []
-    for pcfg in cfg.profiles:
+    for i, pcfg in enumerate(cfg.profiles):
+        if i > 0 and is_okx():
+            time.sleep(0.5)
         placed.extend(_scan_round_for_profile(pcfg))
     return placed
 

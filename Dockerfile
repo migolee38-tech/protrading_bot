@@ -20,4 +20,4 @@ ENV LANG=C.UTF-8 \
 EXPOSE 8501
 
 # Zeabur 注入 PORT；本機 docker run 未設時預設 8501
-CMD ["sh", "-c", "streamlit run streamlit_app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]
+CMD ["sh", "-c", "python live_runner.py --strategies all --top-n 50 --scan-interval 60 --total-capital 1000 --position-pct 1 --leverage 10"]

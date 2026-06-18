@@ -51,13 +51,17 @@ def settings_for_profile(
 def resolve_leverage(clients: Any, symbol: str, settings: Any) -> int:
     sym = symbol.replace("/", "").upper()
     if is_okx():
-        lev = int(getattr(settings, "leverage", 0) or 0)
-        if lev > 0:
-            from core.okx_futures import set_leverage
+        requested = int(getattr(settings, "leverage", 0) or 0) or 10
+        from core.okx_futures import set_leverage
 
-            set_leverage(clients.account, sym, lev)
-            return lev
-        return 10
+        okx_settings = getattr(clients, "settings", None)
+        return set_leverage(
+            clients.account,
+            sym,
+            requested,
+            settings=okx_settings,
+            public=clients.public,
+        )
     from core.binance_futures import resolve_leverage as binance_resolve
 
     return binance_resolve(clients, sym, settings)

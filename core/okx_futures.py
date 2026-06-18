@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal, TypeVar
 
 from core.account_profiles import AccountProfile
 from core.binance_credentials import ExecMode, mode_label
@@ -30,6 +31,12 @@ _INST_ID_RE = re.compile(r"^[A-Z0-9]+-USDT-SWAP$")
 _UNIFIED_SYMBOL_RE = re.compile(r"^[A-Z0-9]+USDT$")
 _INSTRUMENT_CACHE: dict[str, dict[str, Any]] = {}
 _POS_MODE_CACHE: dict[str, str] = {}
+_LEVERAGE_SET_CACHE: set[str] = set()
+_LAST_OKX_WRITE_TS = 0.0
+_OKX_WRITE_MIN_INTERVAL_SEC = 0.35
+_TRANSIENT_OKX_CODES = frozenset({"50001", "50011", "50013", "50026"})
+_OKX_ERROR_CODE_RE = re.compile(r"OKX API (\d+):")
+T = TypeVar("T")
 TriggerPxType = Literal["last", "mark", "index"]
 TD_MODE = "cross"
 
@@ -203,6 +210,79 @@ def ensure_ok_response(response: dict[str, Any], *, context: str = "") -> dict[s
 def format_okx_error(exc: Exception) -> str:
     text = str(exc).strip()
     return text or type(exc).__name__
+
+
+def okx_error_code(exc: Exception) -> str | None:
+    match = _OKX_ERROR_CODE_RE.search(str(exc))
+    return match.group(1) if match else None
+
+
+def is_transient_okx_error(exc: Exception) -> bool:
+    """50001 / 503 等暫時性錯誤，適合退避重試。"""
+    code = okx_error_code(exc)
+    if code in _TRANSIENT_OKX_CODES:
+        return True
+    msg = str(exc).lower()
+    return (
+        "503" in msg
+        or "temporarily unavailable" in msg
+        or "too many requests" in msg
+        or "rate limit" in msg
+    )
+
+
+def _throttle_okx_write() -> None:
+    global _LAST_OKX_WRITE_TS
+    now = time.monotonic()
+    wait = _OKX_WRITE_MIN_INTERVAL_SEC - (now - _LAST_OKX_WRITE_TS)
+    if wait > 0:
+        time.sleep(wait)
+    _LAST_OKX_WRITE_TS = time.monotonic()
+
+
+def call_okx_with_retry(
+    fn: Callable[[], T],
+    *,
+    context: str = "",
+    max_attempts: int = 4,
+    base_delay_sec: float = 0.6,
+) -> T:
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if not is_transient_okx_error(e) or attempt >= max_attempts - 1:
+                raise
+            delay = base_delay_sec * (2**attempt)
+            label = context or "OKX 請求"
+            log.warning(
+                f"{label} 暫時失敗，{delay:.1f}s 後重試 "
+                f"({attempt + 1}/{max_attempts}): {format_okx_error(e)}"
+            )
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
+
+
+def instrument_max_leverage(instrument: dict[str, Any]) -> int:
+    for key in ("lever", "maxLever", "maxLmt"):
+        raw = instrument.get(key)
+        if raw is None or not str(raw).strip():
+            continue
+        try:
+            return max(1, int(float(raw)))
+        except (TypeError, ValueError):
+            continue
+    return 125
+
+
+def resolve_symbol_leverage(public: Any, symbol: str, requested: int) -> int:
+    """依合約上限裁切槓桿（避免 59102）。"""
+    req = max(1, int(requested or 1))
+    instrument = get_instrument(public, symbol)
+    return min(req, instrument_max_leverage(instrument))
 
 
 def _float_val(value: Any, default: float = 0.0) -> float:
@@ -411,15 +491,41 @@ def exchange_position_qty(
     return 0.0
 
 
-def set_leverage(account: Any, symbol: str, leverage: int, *, td_mode: str = TD_MODE) -> None:
+def set_leverage(
+    account: Any,
+    symbol: str,
+    leverage: int,
+    *,
+    td_mode: str = TD_MODE,
+    settings: OkxFuturesSettings | None = None,
+    public: Any | None = None,
+) -> int:
+    """設定槓桿；已設定過則跳過 API。回傳實際使用的槓桿。"""
     inst_id = to_inst_id(symbol)
-    try:
+    effective = leverage
+    if public is not None:
+        effective = resolve_symbol_leverage(public, symbol, leverage)
+
+    cache_suffix = _cache_key_for_settings(settings) if settings else "default"
+    cache_id = f"{cache_suffix}:{inst_id}:{effective}"
+    if cache_id in _LEVERAGE_SET_CACHE:
+        return effective
+
+    def _do() -> None:
+        _throttle_okx_write()
         ensure_ok_response(
-            account.set_leverage(str(leverage), td_mode, instId=inst_id),
+            account.set_leverage(str(effective), td_mode, instId=inst_id),
             context=f"設定槓桿 {inst_id}",
         )
+
+    try:
+        call_okx_with_retry(_do, context=f"設定槓桿 {inst_id}", max_attempts=3)
+        _LEVERAGE_SET_CACHE.add(cache_id)
+        if effective != leverage:
+            log.info(f"{inst_id} 槓桿 {leverage}x → {effective}x（合約上限）")
     except Exception as e:
         log.warning(f"{inst_id} 設定槓桿失敗: {format_okx_error(e)}")
+    return effective
 
 
 def _place_order_kwargs(
@@ -469,7 +575,16 @@ def place_market_entry(
         sz=sz,
         cl_ord_id=cl_ord_id,
     )
-    response = clients.trade.place_order(**kwargs)
+
+    def _place() -> dict[str, Any]:
+        _throttle_okx_write()
+        return clients.trade.place_order(**kwargs)
+
+    response = call_okx_with_retry(
+        _place,
+        context=f"{inst_id} 市價進場",
+        max_attempts=4,
+    )
     row = _algo_row(response, context=f"{inst_id} 市價進場")
     log.info(f"已下單 {_entry_side(side)} {sz} 張 {inst_id}")
     return row

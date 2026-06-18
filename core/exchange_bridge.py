@@ -162,6 +162,14 @@ def futures_settings_from_profile(
     )
 
 
+def is_transient_exchange_error(exc: Exception) -> bool:
+    if is_okx():
+        from core.okx_futures import is_transient_okx_error
+
+        return is_transient_okx_error(exc)
+    return False
+
+
 def format_exchange_error(exc: Exception) -> str:
     if is_okx():
         from core.okx_futures import format_okx_error
