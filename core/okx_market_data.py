@@ -84,8 +84,21 @@ def fetch_klines(
     return out
 
 
+def fetch_live_swap_symbols() -> frozenset[str]:
+    """OKX 永續 USDT-SWAP 且 state=live 的 symbol 集合（BTCUSDT 格式）。"""
+    payload = _get("/api/v5/public/instruments", {"instType": "SWAP"})
+    symbols = {
+        from_inst_id(str(row.get("instId", "")))
+        for row in payload.get("data") or []
+        if str(row.get("state", "")).lower() == "live"
+        and str(row.get("instId", "")).endswith("-USDT-SWAP")
+    }
+    return frozenset(symbols)
+
+
 def fetch_ticker_24h() -> tuple[list[dict], str]:
-    """SWAP 24h ticker；欄位對齊 Binance universe 解析。"""
+    """SWAP 24h ticker；僅含 state=live 合約，與下單可交易清單一致。"""
+    tradable = fetch_live_swap_symbols()
     payload = _get("/api/v5/market/tickers", {"instType": "SWAP"})
     rows = payload.get("data") or []
     out: list[dict] = []
@@ -94,6 +107,8 @@ def fetch_ticker_24h() -> tuple[list[dict], str]:
         if not inst_id.endswith("-USDT-SWAP"):
             continue
         sym = from_inst_id(inst_id)
+        if sym not in tradable:
+            continue
         last = float(row.get("last") or 0)
         open24 = float(row.get("open24h") or 0)
         if last <= 0:

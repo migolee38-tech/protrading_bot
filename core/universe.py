@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from core.exchange_bridge import exchange_label, futures_universe_label
+from core.exchange_config import active_exchange
 from core.market_data import (
     BinanceAPIError,
     MarketType,
@@ -26,7 +27,8 @@ _PRICE_SOURCE_COL = "price_source"
 
 def _cache_path(market: MarketType, top_n: int) -> Path:
     today = date.today().isoformat()
-    return _CACHE_DIR / f"top_volume_{market}_{top_n}_{today}.json"
+    exchange = active_exchange()
+    return _CACHE_DIR / f"top_volume_{exchange}_{market}_{top_n}_{today}.json"
 
 
 def _cache_is_valid_for_market(rows: list[dict], market: MarketType) -> bool:

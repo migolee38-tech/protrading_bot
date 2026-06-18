@@ -122,6 +122,9 @@ def _resolve_symbols(top_n: int) -> list[str]:
 def _filter_tradable_symbols(symbols: list[str], cfg: ProfileRunnerConfig) -> list[str]:
     if cfg.profile.network == ExecMode.PAPER:
         return symbols
+    # OKX 榜單已在 fetch_ticker_24h 依 live 合約過濾；此處僅做最後防線。
+    if is_okx():
+        return [s for s in symbols if s.replace("/", "").upper().endswith("USDT")]
     from core.futures_execution import create_futures_clients, get_tradable_symbols
 
     assert cfg.futures is not None

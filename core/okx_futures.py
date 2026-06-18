@@ -33,7 +33,7 @@ _INSTRUMENT_CACHE: dict[str, dict[str, Any]] = {}
 _POS_MODE_CACHE: dict[str, str] = {}
 _LEVERAGE_SET_CACHE: set[str] = set()
 _LAST_OKX_WRITE_TS = 0.0
-_OKX_WRITE_MIN_INTERVAL_SEC = 0.35
+_OKX_WRITE_MIN_INTERVAL_SEC = 0.6
 _TRANSIENT_OKX_CODES = frozenset({"50001", "50011", "50013", "50026"})
 _OKX_ERROR_CODE_RE = re.compile(r"OKX API (\d+):")
 T = TypeVar("T")
@@ -578,14 +578,15 @@ def place_market_entry(
 
     def _place() -> dict[str, Any]:
         _throttle_okx_write()
-        return clients.trade.place_order(**kwargs)
+        response = clients.trade.place_order(**kwargs)
+        return _algo_row(response, context=f"{inst_id} 市價進場")
 
-    response = call_okx_with_retry(
+    row = call_okx_with_retry(
         _place,
         context=f"{inst_id} 市價進場",
-        max_attempts=4,
+        max_attempts=5,
+        base_delay_sec=1.0,
     )
-    row = _algo_row(response, context=f"{inst_id} 市價進場")
     log.info(f"已下單 {_entry_side(side)} {sz} 張 {inst_id}")
     return row
 
