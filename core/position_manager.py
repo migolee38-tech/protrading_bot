@@ -105,6 +105,12 @@ def place_entry_protection(clients: Any, state: LivePositionState) -> None:
         _place_tp_algo(clients, state, state.tp_1r, tp1)
         if rest > 0:
             _place_tp_algo(clients, state, state.tp_final, rest)
+    elif state.strategy_id == "smc_ict":
+        tp1 = state.initial_qty * cfg.SMC_TP1_REDUCE_PCT
+        rest = max(0.0, state.remaining_qty - tp1)
+        _place_tp_algo(clients, state, state.tp_1r, tp1)
+        if rest > 0:
+            _place_tp_algo(clients, state, state.tp_final, rest)
 
 
 def register_live_position(
@@ -354,7 +360,15 @@ def _execute_donchian_events(clients: Any, state: LivePositionState, events: lis
             _finalize_position(clients, state)
 
 
-def _tick_hunting(clients: Any, state: LivePositionState, high: float, low: float) -> None:
+def _tick_hunting_like(
+    clients: Any,
+    state: LivePositionState,
+    high: float,
+    low: float,
+    *,
+    tp1_reduce: float,
+    log_tag: str,
+) -> None:
     direction = "LONG" if state.side == "long" else "SHORT"
     leg = HuntingLeg(
         direction=direction,
@@ -371,14 +385,14 @@ def _tick_hunting(clients: Any, state: LivePositionState, high: float, low: floa
     before_stage = leg.stage
     before_sl = leg.sl
 
-    closed = _process_bar_exits(leg, high, low, cfg.HUNTING_TP1_REDUCE_PCT)
+    closed = _process_bar_exits(leg, high, low, tp1_reduce)
 
     state.stage = leg.stage
     state.stop = leg.sl
     state.remaining_qty = leg.remaining * state.initial_qty
 
     if leg.stage == 1 and before_stage == 0:
-        target = state.initial_qty * (1.0 - cfg.HUNTING_TP1_REDUCE_PCT)
+        target = state.initial_qty * (1.0 - tp1_reduce)
         if not _qty_already_at_target(clients, state, target):
             _apply_target_qty(clients, state, target)
         _cancel_tp_algos(clients, state)
@@ -394,8 +408,30 @@ def _tick_hunting(clients: Any, state: LivePositionState, high: float, low: floa
         _replace_stop_algo(clients, state, leg.sl)
 
     if closed is not None:
-        log.info(f"[hunting_funding] {state.symbol} 平倉 {closed[1]} pnl_r={closed[0]:.2f}")
+        log.info(f"[{log_tag}] {state.symbol} 平倉 {closed[1]} pnl_r={closed[0]:.2f}")
         _finalize_position(clients, state)
+
+
+def _tick_hunting(clients: Any, state: LivePositionState, high: float, low: float) -> None:
+    _tick_hunting_like(
+        clients,
+        state,
+        high,
+        low,
+        tp1_reduce=cfg.HUNTING_TP1_REDUCE_PCT,
+        log_tag="hunting_funding",
+    )
+
+
+def _tick_smc(clients: Any, state: LivePositionState, high: float, low: float) -> None:
+    _tick_hunting_like(
+        clients,
+        state,
+        high,
+        low,
+        tp1_reduce=cfg.SMC_TP1_REDUCE_PCT,
+        log_tag="smc_ict",
+    )
 
 
 def _tick_ema_or_donchian(
@@ -462,6 +498,8 @@ def tick_position(
 
     if state.strategy_id == "hunting_funding":
         _tick_hunting(clients, state, high, low)
+    elif state.strategy_id == "smc_ict":
+        _tick_smc(clients, state, high, low)
     else:
         _tick_ema_or_donchian(clients, state, high, low)
 

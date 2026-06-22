@@ -169,6 +169,56 @@ def build_hunting_trade_plan(side: str, entry: float, stop: float) -> TradePlan 
     )
 
 
+def build_smc_trade_plan(
+    side: str,
+    entry: float,
+    ob_low: float,
+    ob_high: float,
+    sweep_level: float,
+) -> TradePlan | None:
+    """SMC：止損在 OB 外側與 sweep 極值外側（取較遠者）。"""
+    buf = cfg.SMC_SL_BUFFER_PCT
+    if side == "long":
+        raw_stop = min(ob_low, sweep_level)
+        stop = raw_stop * (1.0 - buf)
+    else:
+        raw_stop = max(ob_high, sweep_level)
+        stop = raw_stop * (1.0 + buf)
+
+    risk = _risk_pct(entry, stop, side)
+    if risk > cfg.SMC_MAX_SL_PCT / 100.0:
+        return None
+    r = abs(entry - stop)
+    if r <= 0:
+        return None
+
+    rr2 = cfg.SMC_RR_TP2
+    rr3 = cfg.SMC_RR_TP3
+    if side == "long":
+        tp_1r = entry + r
+        tp_2r = entry + rr2 * r
+        tp_final = entry + rr3 * r
+    else:
+        tp_1r = entry - r
+        tp_2r = entry - rr2 * r
+        tp_final = entry - rr3 * r
+
+    margin = cfg.SMC_TOTAL_CAPITAL * cfg.SMC_POSITION_PCT / 100.0
+    size = margin / entry if entry > 0 else 0.0
+    return TradePlan(
+        side=side,
+        entry=entry,
+        stop=stop,
+        r=r,
+        tp_1r=tp_1r,
+        tp_2r=tp_2r,
+        tp_final=tp_final,
+        stop_source="smc_ob_sweep",
+        risk_pct=risk,
+        position_size=size,
+    )
+
+
 def recalc_plan_for_fill(plan: TradePlan, fill_entry: float, strategy_id: str) -> TradePlan:
     """以實際成交價重算 R 與止盈（止損價不變）。"""
     stop = plan.stop
@@ -188,7 +238,9 @@ def recalc_plan_for_fill(plan: TradePlan, fill_entry: float, strategy_id: str) -
             position_size=plan.position_size,
         )
 
-    if strategy_id == "hunting_funding":
+    if strategy_id == "smc_ict":
+        rr1, rr2, rr_final = 1.0, cfg.SMC_RR_TP2, cfg.SMC_RR_TP3
+    elif strategy_id == "hunting_funding":
         rr1, rr2, rr_final = 1.0, 3.0, 5.0
     elif strategy_id == "donchian":
         rr1 = cfg.DONCHIAN_RR_TP1

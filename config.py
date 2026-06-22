@@ -81,6 +81,24 @@ HUNTING_USE_DIRECTION_COOLDOWN = False
 HUNTING_MAX_CONSECUTIVE_SL_DIR = 2
 HUNTING_OI_MAX_HIST = 500          # Binance openInterestHist 單次上限
 
+# --- SMC / ICT（15m · BOS + Liquidity Sweep + Order Block）---
+SMC_TIMEFRAME = "15m"
+SMC_SWING_LEFT = 2
+SMC_SWING_RIGHT = 2
+SMC_OB_LOOKBACK = 20
+SMC_OB_TOUCH_PAD_PCT = 0.05
+SMC_SWEEP_TOLERANCE_PCT = 0.05
+SMC_SWEEP_MAX_BARS = 8
+SMC_ENTRY_EXPIRE_BARS = 12
+SMC_COOLDOWN_BARS = 8
+SMC_SL_BUFFER_PCT = 0.01
+SMC_MAX_SL_PCT = 5.0
+SMC_TP1_REDUCE_PCT = 0.30
+SMC_RR_TP2 = 3.0
+SMC_RR_TP3 = 5.0
+SMC_TOTAL_CAPITAL = 100.0
+SMC_POSITION_PCT = 1.0
+
 
 def active_timeframe() -> str:
     """依目前 STRATEGY 回傳對應週期（EMA 用 TIMEFRAME，唐奇安用 DONCHIAN_TIMEFRAME）。"""
@@ -88,6 +106,8 @@ def active_timeframe() -> str:
         return DONCHIAN_TIMEFRAME
     if STRATEGY == "hunting_funding":
         return HUNTING_FUNDING_TIMEFRAME
+    if STRATEGY == "smc_ict":
+        return SMC_TIMEFRAME
     return TIMEFRAME
 
 

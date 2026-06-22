@@ -23,6 +23,10 @@ class StrategyMeta:
             from strategies.hunting_funding import prepare_dataframe
 
             return prepare_dataframe(raw)
+        if self.id == "smc_ict":
+            from strategies.smc_ict import prepare_dataframe
+
+            return prepare_dataframe(raw)
         if self.id == "donchian":
             df = add_indicators(raw)
             return add_donchian_channels(df)
@@ -75,6 +79,12 @@ STRATEGIES: dict[str, StrategyMeta] = {
         description="OI/CVD/量能/EMA150 趨勢/動能五星評分 · 1R減倉30% · 5R全出",
         timeframe=cfg.HUNTING_FUNDING_TIMEFRAME,
     ),
+    "smc_ict": StrategyMeta(
+        id="smc_ict",
+        name="SMC / ICT",
+        description="15m BOS + Liquidity Sweep + Order Block 回踩 · 1R減倉30% · 5R全出",
+        timeframe=cfg.SMC_TIMEFRAME,
+    ),
 }
 
 
@@ -94,6 +104,10 @@ def scan_signals_for(strategy_id: str, df: pd.DataFrame) -> list:
     with use_strategy(strategy_id):
         if strategy_id == "hunting_funding":
             from strategies.hunting_funding import scan_signals
+
+            return scan_signals(df)
+        if strategy_id == "smc_ict":
+            from strategies.smc_ict import scan_signals
 
             return scan_signals(df)
         if strategy_id == "donchian":

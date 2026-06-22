@@ -59,6 +59,15 @@ def min_bars_required() -> int:
             + cfg.HUNTING_LOOKBACK
             + 10
         )
+    if cfg.STRATEGY == "smc_ict":
+        return (
+            cfg.SMC_SWING_LEFT
+            + cfg.SMC_SWING_RIGHT
+            + cfg.SMC_OB_LOOKBACK
+            + cfg.SMC_ENTRY_EXPIRE_BARS
+            + cfg.SMC_SWEEP_MAX_BARS
+            + 20
+        )
     if cfg.STRATEGY == "donchian":
         return cfg.DONCHIAN_LEN + cfg.DONCHIAN_ENTRY_EXPIRE_BARS + 8
     warmup = max(cfg.EMA_SLOW, cfg.EMA_VOLUME_PRICE, cfg.VOLUME_MA) + 5

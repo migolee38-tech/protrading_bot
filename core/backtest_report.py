@@ -113,6 +113,50 @@ def _run_hunting_backtest(
     )
 
 
+def _run_smc_backtest(
+    strategy_id: str,
+    symbol: str,
+    raw_df: pd.DataFrame,
+    meta: StrategyMeta,
+) -> BacktestResult:
+    from core.strategy_registry import with_symbol
+    from strategies.smc_ict import run_dashboard_backtest
+
+    df = meta.prepare_df(with_symbol(raw_df, symbol))
+    with use_strategy(strategy_id):
+        need = min_bars_required()
+        if len(df) < need:
+            return BacktestResult(
+                strategy_id=strategy_id,
+                symbol=symbol,
+                timeframe=meta.timeframe,
+                bars=len(df),
+                signal_count=0,
+                open_count=0,
+                win_count=0,
+                loss_count=0,
+                win_rate=0.0,
+                events=[f"K 線不足，需要至少 {need} 根"],
+            )
+        stats = run_dashboard_backtest(df)
+    return BacktestResult(
+        strategy_id=strategy_id,
+        symbol=symbol,
+        timeframe=meta.timeframe,
+        bars=len(df),
+        signal_count=stats["signal_count"],
+        open_count=stats["open_count"],
+        win_count=stats["wins"],
+        loss_count=stats["losses"],
+        win_rate=stats["win_rate"],
+        profit_factor=stats.get("profit_factor", 0.0),
+        realized_pnl_usdt=stats.get("realized_pnl_usdt", 0.0),
+        unrealized_pnl_usdt=stats.get("unrealized_pnl_usdt", 0.0),
+        total_pnl_usdt=stats.get("total_pnl_usdt", 0.0),
+        events=stats["events"],
+    )
+
+
 def run_backtest(
     strategy_id: str,
     symbol: str,
@@ -122,6 +166,8 @@ def run_backtest(
     meta = meta or get_strategy(strategy_id)
     if strategy_id == "hunting_funding":
         return _run_hunting_backtest(strategy_id, symbol, raw_df, meta)
+    if strategy_id == "smc_ict":
+        return _run_smc_backtest(strategy_id, symbol, raw_df, meta)
 
     from core.strategy_registry import with_symbol
 
