@@ -12,6 +12,11 @@ _VALID = re.compile(r"^[\.A-Z\:/a-z0-9_-]+$")
 _ALNUM = re.compile(r"[^a-zA-Z0-9]")
 
 
+def _compact_strategy_id(strategy_id: str) -> str:
+    """OKX clOrdId 用：移除非英數字（與 build_okx_client_order_id 一致）。"""
+    return _ALNUM.sub("", (strategy_id or "").strip())
+
+
 def build_client_order_id(strategy_id: str, symbol: str) -> str:
     """
     產生 Binance newClientOrderId（最長 36 字元）。
@@ -38,7 +43,7 @@ def build_okx_client_order_id(strategy_id: str, symbol: str) -> str:
     OKX clOrdId：僅英數字、最長 32、須以字母開頭。
     格式：tb{strategy_id}{SYMBOL}（移除非英數字）
     """
-    sid = _ALNUM.sub("", (strategy_id or "unknown").strip())
+    sid = _compact_strategy_id(strategy_id or "unknown")
     sym = _ALNUM.sub("", symbol.replace("/", "").upper())
     cid = f"tb{sid}{sym}"
     if not cid or not cid[0].isalpha():
@@ -71,7 +76,14 @@ def parse_strategy_id(client_order_id: str | None) -> str | None:
         from core.strategy_registry import STRATEGIES
 
         body = cid[2:]
-        for sid in sorted(STRATEGIES.keys(), key=len, reverse=True):
+        for sid in sorted(
+            STRATEGIES.keys(),
+            key=lambda s: len(_compact_strategy_id(s)),
+            reverse=True,
+        ):
+            compact = _compact_strategy_id(sid)
+            if compact and body.startswith(compact):
+                return sid
             if body.startswith(sid):
                 return sid
     return None
