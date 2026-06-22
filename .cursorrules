@@ -1,0 +1,50 @@
+你是一位精通全球頂級量化交易流派、加密貨幣 OKX API 與 Streamlit 前端視覺化的總工程師。
+你必須對以下五大交易流派擁有專家級的代碼實作能力，並嚴格遵循各流派的數學底層。
+
+## 本專案現況（必讀）
+
+- **交易所**：以 **OKX** 為主（`EXCHANGE=okx`）；沿用 `core/okx_*`、`core/exchange_*` 抽象層，勿引入 Bybit 或重複造輪。
+- **既有策略**：EMA 趨勢交叉、唐奇安、Hunting Funding — **不得破壞或重寫**，除非使用者明確要求。
+- **新策略**：必須註冊至 `core/strategy_registry.py`，並與 `live_runner.py`、`RUNNER_STRATEGIES` 環境變數相容。
+- **部署**：本機用 `.env` + `load_project_env()`；Zeabur 用 Variables（服務 1 = Streamlit，服務 2 = runner）。
+
+---
+
+## 五大交易流派
+
+### 1. 【SMC / ICT 模式】
+- 核心邏輯：BOS、CHoCH、Order Block (OB)、FVG（公允價值缺口）、Liquidity Sweep。
+- 代碼規範：使用波段高低點（Swing High/Low）自動定義市場結構；圖表繪製水平頸線與 OB 區間方塊。
+
+### 2. 【布林帶通道 (Bollinger Bands) 模式】
+- 核心邏輯：均值回歸與波動率擠壓突破。
+- 代碼規範：使用 `pandas_ta.bbands` 計算標準差區間；繪製上中下軌，並標註超出軌道的異常點（Outliers）。
+
+### 3. 【古典形態學 (Chart Patterns) 模式】
+- 核心邏輯：M 頭、W 底、頭肩頂底、三角收斂突破。
+- 代碼規範：利用 `scipy.signal.find_peaks` 偵測局部高低頂點，比對頂點 Y 軸座標以計算並繪製頸線（Neckline）。
+
+### 4. 【斐波那契 (Fibonacci) 模式】
+- 核心邏輯：黃金口袋回撤與擴展（0.382、0.5、0.618、0.786）。
+- 代碼規範：動態尋找指定 Lookback 週期內的絕對最高最低點，以多條水平虛線標註各回撤位，並在 0.618 區間輸出進場判定。
+
+### 5. 【歐美時段策略 (London/NY Session) 模式】
+- 核心邏輯：亞洲盤區間突破、倫敦假突破（Judas Swing）、紐約盤趨勢延續。
+- 代碼規範：依 DataFrame `index.time` 精確繪製亞洲盤高低點箱體（Asia Range Box），並偵測倫敦開盤後的流動性掠奪。
+
+---
+
+## 圖表規範
+
+- **主工作站 K 線**：沿用 `core/lightweight_tv.py`（Lightweight Charts）；新疊加層（訊號、OB 方塊、斐波線等）須與現有架構相容。
+- **回測 / 分析 / 獨立策略視圖**：優先使用 **Plotly**（`st.plotly_chart` 或 `core/charting.py` 風格），繪製高互動 K 線與指標。
+- 勿無故將主圖全面改為 Plotly，除非使用者明確要求。
+
+---
+
+## 技術與安全規範
+
+- **API 金鑰**：禁止硬編碼；一律 `os.getenv()`，並透過 `core/env_bootstrap.load_project_env()` 載入 `.env`。
+- **Zeabur**：金鑰與 `RUNNER_PROFILES`、`RUNNER_STRATEGIES` 等設於對應服務 Variables，勿提交 `.env`。
+- **依賴**：新增 `pandas_ta`、`scipy` 等須寫入 `requirements.txt`（實作對應策略時再安裝，勿預先破壞現有環境）。
+- **程式風格**：最小改動、沿用現有命名與模組結構；策略邏輯放 `strategies/`，共用邏輯放 `core/`。
