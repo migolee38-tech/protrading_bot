@@ -2,11 +2,12 @@
 """
 多策略 24/7 自動交易 — 多帳戶單進程輪詢
 
-策略：EMA、唐奇安、Hunting Funding（預設全部啟用）
+策略：EMA、唐奇安、Hunting Funding（預設全部啟用；可用 RUNNER_STRATEGIES 或 --strategies 篩選）
 
 用法：
   python live_runner.py --verify-only --profiles all
   python live_runner.py --profiles all
+  RUNNER_STRATEGIES=hunting_funding python live_runner.py --profiles all
   python live_runner.py --profiles account1:testnet,account2:testnet
   python live_runner.py --exec testnet          # 向後相容：僅 account1
 """
@@ -299,9 +300,25 @@ def _resolve_profiles(args: argparse.Namespace) -> list[AccountProfile]:
     return [load_profile("account1", args.exec)]
 
 
+def _resolve_strategy_ids(cli_strategies: str | None) -> list[str]:
+    """CLI --strategies 優先；未指定時讀 RUNNER_STRATEGIES；皆無則 all。"""
+    spec = (cli_strategies or os.getenv("RUNNER_STRATEGIES", "") or "all").strip()
+    if spec.lower() == "all":
+        return list(_ALL_STRATEGY_IDS)
+    strategy_ids = [s.strip() for s in spec.split(",") if s.strip()]
+    unknown = [s for s in strategy_ids if s not in STRATEGIES]
+    if unknown:
+        raise SystemExit(f"未知策略: {unknown}，可選: {_ALL_STRATEGY_IDS}")
+    return strategy_ids
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="多策略 24/7 自動交易（多帳戶）")
-    p.add_argument("--strategies", default="all", help="策略 ID，逗號分隔，或 all")
+    p.add_argument(
+        "--strategies",
+        default=None,
+        help="策略 ID，逗號分隔，或 all（未指定時讀 RUNNER_STRATEGIES）",
+    )
     p.add_argument("--top-n", type=int, default=100)
     p.add_argument(
         "--profiles",
@@ -339,13 +356,7 @@ def main() -> None:
     if has_live and not args.confirm_live and not args.verify_only:
         raise SystemExit("profile 含 live 請加上 --confirm-live 以確認主網實盤風險")
 
-    if args.strategies.strip().lower() == "all":
-        strategy_ids = list(_ALL_STRATEGY_IDS)
-    else:
-        strategy_ids = [s.strip() for s in args.strategies.split(",") if s.strip()]
-        unknown = [s for s in strategy_ids if s not in STRATEGIES]
-        if unknown:
-            raise SystemExit(f"未知策略: {unknown}，可選: {_ALL_STRATEGY_IDS}")
+    strategy_ids = _resolve_strategy_ids(args.strategies)
 
     profile_cfgs: list[ProfileRunnerConfig] = []
     for profile in profiles:

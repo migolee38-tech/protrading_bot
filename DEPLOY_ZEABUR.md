@@ -19,7 +19,7 @@ Zeabur 伺服器可選 **新加坡** 等亞洲區域，較容易直連 `fapi.bin
 
 1. 同一 Project → **Add Service** → **Git** → 同一 repo  
 2. **服務名稱設為 `runner`**（Zeabur 會自動用 `Dockerfile.runner`）  
-3. Variables 設 `EXCHANGE=okx`、`RUNNER_PROFILES`、`OKX_*_TESTNET_*` 等（見 `.env.example`）  
+3. Variables 設 `EXCHANGE=okx`、`RUNNER_PROFILES`、`RUNNER_STRATEGIES`、`OKX_*_TESTNET_*` 等（見 `.env.example`）  
 4. **不要**綁公開網域；以 **Logs** 確認 `🚀 多帳戶自動交易啟動`
 
 服務 1 與服務 2 的 Variables **各自獨立設定**（Save 後 Redeploy）。
@@ -91,6 +91,7 @@ git push
 |------|------|
 | `EXCHANGE` | **`okx`**（或 binance） |
 | `RUNNER_PROFILES` | 例如 `account1:testnet,account2:testnet` |
+| `RUNNER_STRATEGIES` | 例如 `hunting_funding`（只跑 Hunting）；未設或 `all` = 全部策略 |
 | `OKX_ACCOUNT1_TESTNET_API_KEY` 等 | Demo 金鑰三件套 × 各帳戶 |
 | `TRADING_ACCOUNTS` | `account1,account2` |
 

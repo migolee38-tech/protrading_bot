@@ -36,7 +36,6 @@ fi
 
 COMMON_ARGS=(
   --profiles "$PROFILE_SPEC"
-  --strategies all
   --top-n 100
   --scan-interval 30
   --total-capital 1000
@@ -45,7 +44,7 @@ COMMON_ARGS=(
 )
 
 if [[ "$MODE" == "live" ]]; then
-  COMMON_ARGS=(--profiles all --strategies all --top-n 100 --scan-interval 30
+  COMMON_ARGS=(--profiles all --top-n 100 --scan-interval 30
     --total-capital 1000 --position-pct 1 --leverage 10 --confirm-live)
   echo "⚠️  主網實盤：--profiles all 含 live profile 時使用真實資金"
 fi
