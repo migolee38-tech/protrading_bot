@@ -95,6 +95,8 @@ git push
 | `OKX_ACCOUNT1_TESTNET_API_KEY` 等 | Demo 金鑰三件套 × 各帳戶 |
 | `TRADING_ACCOUNTS` | `account1,account2` |
 
+Redeploy 後 runner Logs 應有 `RUNNER_STRATEGIES='hunting_funding' → 策略：Hunting Funding`；若仍列出四策略，確認變數設在 **本 runner 服務** 而非僅 Streamlit。
+
 勿在 runner 服務設 `ZBPACK_START_COMMAND` 覆寫成 `--verify-only`（驗完即退出）。  
 `APP_LOGIN_PASSWORD` 僅 Streamlit 需要，runner 不必設。
 

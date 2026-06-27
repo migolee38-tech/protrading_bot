@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
 
-from core.env_bootstrap import load_project_env
+from core.env_bootstrap import env_value, load_project_env
 from core.trade_data_store import maybe_clear_from_env
 
 load_project_env()
@@ -259,11 +259,14 @@ def run_loop(cfg: RunnerConfig) -> None:
 
     names = ", ".join(get_strategy(s).name for s in cfg.profiles[0].strategy_ids)
     profile_names = ", ".join(p.profile.display_name for p in cfg.profiles)
+    raw_strategies = os.getenv("RUNNER_STRATEGIES")
     log.info(
         f"🚀 多帳戶自動交易啟動  Profiles: {profile_names}  "
         f"每 {cfg.scan_interval_sec}s 一輪"
     )
-    log.info(f"策略：{names}")
+    log.info(
+        f"RUNNER_STRATEGIES={raw_strategies!r} → 策略：{names}"
+    )
 
     while True:
         try:
@@ -302,7 +305,7 @@ def _resolve_profiles(args: argparse.Namespace) -> list[AccountProfile]:
 
 def _resolve_strategy_ids(cli_strategies: str | None) -> list[str]:
     """CLI --strategies 優先；未指定時讀 RUNNER_STRATEGIES；皆無則 all。"""
-    spec = (cli_strategies or os.getenv("RUNNER_STRATEGIES", "") or "all").strip()
+    spec = (cli_strategies or env_value("RUNNER_STRATEGIES") or "all").strip()
     if spec.lower() == "all":
         return list(_ALL_STRATEGY_IDS)
     strategy_ids = [s.strip() for s in spec.split(",") if s.strip()]

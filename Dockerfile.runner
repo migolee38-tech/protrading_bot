@@ -18,4 +18,4 @@ ENV LANG=C.UTF-8 \
     PYTHONUTF8=1 \
     PYTHONUNBUFFERED=1
 
-CMD ["sh", "-c", "python live_runner.py --top-n 50 --scan-interval 60 --total-capital 1000 --position-pct 1 --leverage 10"]
+CMD ["sh", "-c", "python live_runner.py --strategies \"${RUNNER_STRATEGIES:-all}\" --profiles \"${RUNNER_PROFILES:-all}\" --top-n 50 --scan-interval 60 --total-capital 1000 --position-pct 1 --leverage 10"]
