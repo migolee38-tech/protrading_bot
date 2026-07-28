@@ -1,4 +1,1 @@
-# 策略模組（互不覆蓋設定，僅 STRATEGY 切換執行哪一套）：
-#   EMA:     config.TIMEFRAME、RR_*、REDUCE_AT_* → strategies/ema_trend_cross.py
-#   唐奇安: config.DONCHIAN_*、DONCHIAN_TIMEFRAME → strategies/donchian_multi_tp.py
-# config.STRATEGY = "ema" | "donchian" | "hunting_funding"
+# 策略由 core.strategy_registry 註冊：hunting_funding | hunting2 | smc_ict

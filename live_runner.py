@@ -2,11 +2,12 @@
 """
 多策略 24/7 自動交易 — 多帳戶單進程輪詢
 
-策略：EMA、唐奇安、Hunting Funding、SMC / ICT（可用 RUNNER_STRATEGIES 或 --strategies 篩選）
+策略：Hunting Funding、Hunting 2.0、SMC / ICT（可用 RUNNER_STRATEGIES 或 --strategies 篩選）
 
 用法：
   python live_runner.py --verify-only --profiles all
   python live_runner.py --profiles all
+  RUNNER_STRATEGIES=hunting2 python live_runner.py --profiles all
   RUNNER_STRATEGIES=hunting_funding python live_runner.py --profiles all
   python live_runner.py --profiles account1:testnet,account2:testnet
   python live_runner.py --exec testnet          # 向後相容：僅 account1
@@ -188,9 +189,9 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
             tp = getattr(plan, "tp_final", None)
             pos_size = float(getattr(plan, "position_size", 0) or 0)
             if order_mode == OrderMode.PAPER:
-                qty = pos_size if sid == "donchian" and pos_size > 0 else max(pos_size, 0.001)
+                qty = max(pos_size, 0.001) if pos_size > 0 else 0.001
             else:
-                qty = pos_size if sid == "donchian" and pos_size > 0 else 0.0
+                qty = 0.0
 
             req = OrderRequest(
                 symbol=bin_sym,

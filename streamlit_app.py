@@ -121,7 +121,7 @@ def _init_state() -> None:
         "market": "futures",
         "order_enabled": True,
         "order_live_confirmed": False,
-        "chart_highlight_id": "ema",
+        "chart_highlight_id": "hunting2",
         "active_strategy_ids": list(STRATEGIES.keys()),
         "sidebar_top_n": 100,
         "sidebar_kline_limit": 500,
@@ -367,11 +367,14 @@ def _sidebar_panel(market: MarketType) -> tuple[int, int, pd.DataFrame]:
         key="sidebar_kline_limit",
     )
     if (
-        "hunting_funding" in st.session_state.get("active_strategy_ids", [])
+        any(
+            s in st.session_state.get("active_strategy_ids", [])
+            for s in ("hunting_funding", "hunting2")
+        )
         and kline_limit > 500
     ):
         st.sidebar.warning(
-            "Hunting Funding：K 線 > 500 時，OI 歷史僅覆蓋最近 500 根，"
+            "Hunting / Hunting 2.0：K 線 > 500 時，OI 歷史僅覆蓋最近 500 根，"
             "較舊 K 線可能無 OI 資料。"
         )
     st.sidebar.caption("回測 → 模擬 → 實盤（需 API + 手動確認）")
@@ -482,20 +485,23 @@ def _render_hunting_oi_status(
     market: MarketType,
     strategy_ids: list[str],
 ) -> None:
-    """Hunting Funding：OI 資料來源狀態面板。"""
-    if "hunting_funding" not in strategy_ids:
+    """Hunting Funding / Hunting 2.0：OI 資料來源狀態面板。"""
+    hunting_ids = [s for s in ("hunting_funding", "hunting2") if s in strategy_ids]
+    if not hunting_ids:
         return
 
-    st.markdown("**Hunting Funding · OI 資料狀態**")
+    st.markdown("**Hunting · OI 資料狀態**")
 
     if market != "futures":
         st.error(
-            "Hunting Funding 需要 **永續合約 (futures)** 的 OI 資料。"
+            "Hunting 策略需要 **永續合約 (futures)** 的 OI 資料。"
             "請於頂部將市場切換為「永續」。"
         )
         return
 
-    meta = STRATEGIES["hunting_funding"]
+    # 兩策略共用 OI 來源；優先用已選的第一個 hunting id
+    sid = hunting_ids[0]
+    meta = STRATEGIES[sid]
     prep = meta.prepare_df(with_symbol(raw, sym, kline_limit=kline_limit))
     status = load_oi_status(prep)
     if status is None:
@@ -974,13 +980,14 @@ def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int)
     pair = st.session_state.selected_pair
     st.caption(f"目前交易對：{pair}（{sym}）· 策略來自主工作站側欄／頂部多選")
 
-    if "hunting_funding" in strategy_ids:
+    if any(s in strategy_ids for s in ("hunting_funding", "hunting2")):
         try:
-            hf_tf = STRATEGIES["hunting_funding"].timeframe
+            oi_sid = "hunting2" if "hunting2" in strategy_ids else "hunting_funding"
+            hf_tf = STRATEGIES[oi_sid].timeframe
             raw_oi, _ = _cached_klines(sym, hf_tf, kline_limit, market)
             _render_hunting_oi_status(raw_oi, sym, kline_limit, market, strategy_ids)
         except Exception as exc:
-            st.error(f"無法檢查 Hunting Funding OI 狀態：{exc}")
+            st.error(f"無法檢查 Hunting OI 狀態：{exc}")
 
     if st.button("執行回測（目前交易對 × 已選策略）", type="primary", key="tab_bt_run"):
         if not strategy_ids:

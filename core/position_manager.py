@@ -1,4 +1,4 @@
-"""實盤持倉管理：分批止盈、移動止損（EMA / 唐奇安 / Hunting Funding）。"""
+"""實盤持倉管理：分批止盈、移動止損（Hunting Funding / Hunting 2.0 / SMC）。"""
 
 from __future__ import annotations
 
@@ -26,8 +26,6 @@ from core.live_positions import (
 )
 from core.market_data import fetch_klines
 from core.strategy_registry import get_strategy
-from position import Position
-from position_donchian import DonchianPosition
 from risk import TradePlan, recalc_plan_for_fill
 from strategies.hunting_funding import (
     OpenPosition as HuntingLeg,
@@ -93,14 +91,13 @@ def place_entry_protection(clients: Any, state: LivePositionState) -> None:
     """依策略掛初始止損與第一批止盈。"""
     _replace_stop_algo(clients, state, state.stop)
 
-    if state.strategy_id == "ema":
-        qty = state.initial_qty * cfg.REDUCE_AT_1R_PCT
-        _place_tp_algo(clients, state, state.tp_1r, qty)
-    elif state.strategy_id == "donchian":
-        qty = state.initial_qty * cfg.DONCHIAN_REDUCE_TP1_PCT
-        _place_tp_algo(clients, state, state.tp_1r, qty)
-    elif state.strategy_id == "hunting_funding":
-        tp1 = state.initial_qty * cfg.HUNTING_TP1_REDUCE_PCT
+    if state.strategy_id in ("hunting_funding", "hunting2"):
+        tp1_pct = (
+            cfg.HUNTING_TP1_REDUCE_PCT
+            if state.strategy_id == "hunting_funding"
+            else cfg.HUNTING2_TP1_REDUCE_PCT
+        )
+        tp1 = state.initial_qty * tp1_pct
         rest = max(0.0, state.remaining_qty - tp1)
         _place_tp_algo(clients, state, state.tp_1r, tp1)
         if rest > 0:
@@ -180,54 +177,6 @@ def _bar_high_low(symbol: str, strategy_id: str, mark: float) -> tuple[float, fl
     return mark, mark
 
 
-def _build_ema_position(state: LivePositionState) -> Position:
-    plan = state.to_trade_plan()
-    pos = Position(
-        symbol=state.symbol,
-        plan=plan,
-        initial_size=state.initial_qty,
-        size=state.remaining_qty,
-    )
-    pos.stop = state.stop
-    pos.reduced_1r = state.reduced_1r
-    pos.reduced_2r = state.reduced_2r
-    pos.trailing_active = state.trailing_active
-    pos.peak_r = state.peak_r
-    pos.closed = state.closed
-    return pos
-
-
-def _build_donchian_position(state: LivePositionState) -> DonchianPosition:
-    plan = state.to_trade_plan()
-    pos = DonchianPosition(
-        symbol=state.symbol,
-        plan=plan,
-        initial_size=state.initial_qty,
-        size=state.remaining_qty,
-    )
-    pos.stop = state.stop
-    pos.reduced_tp1 = state.reduced_1r
-    pos.reduced_tp2 = state.reduced_2r
-    pos.trailing_active = state.trailing_active
-    pos.peak_r = state.peak_r
-    pos.closed = state.closed
-    return pos
-
-
-def _sync_position_state(state: LivePositionState, pos: Position | DonchianPosition) -> None:
-    state.stop = pos.stop
-    state.remaining_qty = pos.size
-    if isinstance(pos, DonchianPosition):
-        state.reduced_1r = pos.reduced_tp1
-        state.reduced_2r = pos.reduced_tp2
-    else:
-        state.reduced_1r = pos.reduced_1r
-        state.reduced_2r = pos.reduced_2r
-    state.trailing_active = pos.trailing_active
-    state.peak_r = pos.peak_r
-    state.closed = pos.closed
-
-
 def _market_reduce_qty(
     clients: Any,
     state: LivePositionState,
@@ -248,12 +197,11 @@ def _market_reduce_qty(
         log.error(f"{state.symbol} 減倉失敗: {format_futures_error(e)}")
         return 0.0
     after = exchange_position_qty(clients, state.symbol, state.side)
-    reduced = max(0.0, before - after)
     state.remaining_qty = after
     if state.remaining_qty <= 0 or after <= 0:
         state.remaining_qty = 0.0
         state.closed = True
-    return reduced
+    return max(0.0, before - after)
 
 
 def _qty_already_at_target(
@@ -278,30 +226,6 @@ def _apply_target_qty(clients: Any, state: LivePositionState, target_qty: float)
         state.remaining_qty = ex_qty
 
 
-def _after_partial_tp_ema(clients: Any, state: LivePositionState, event: str) -> None:
-    _cancel_tp_algos(clients, state)
-    if event == "partial_tp_1r":
-        _replace_stop_algo(clients, state, state.entry_price)
-        qty = state.initial_qty * cfg.REDUCE_AT_2R_PCT
-        _place_tp_algo(clients, state, state.tp_2r, qty)
-    elif event == "partial_tp_2r":
-        plan = state.to_trade_plan()
-        _replace_stop_algo(clients, state, plan.stop_1r)
-        if state.remaining_qty > 0:
-            _place_tp_algo(clients, state, state.tp_final, state.remaining_qty)
-
-
-def _after_partial_tp_donchian(clients: Any, state: LivePositionState, event: str) -> None:
-    _cancel_tp_algos(clients, state)
-    if event.startswith("partial_tp_2r"):
-        _replace_stop_algo(clients, state, state.entry_price)
-    elif event.startswith("partial_tp_5r"):
-        plan = state.to_trade_plan()
-        _replace_stop_algo(clients, state, plan.stop_3r)
-        if state.remaining_qty > 0:
-            _place_tp_algo(clients, state, state.tp_final, state.remaining_qty)
-
-
 def _finalize_position(clients: Any, state: LivePositionState) -> None:
     qty = exchange_position_qty(clients, state.symbol, state.side)
     if qty > 0:
@@ -312,52 +236,6 @@ def _finalize_position(clients: Any, state: LivePositionState) -> None:
     _cancel_all_algos(clients, state)
     state.remaining_qty = 0.0
     state.closed = True
-
-
-def _execute_ema_events(clients: Any, state: LivePositionState, events: list[str]) -> None:
-    for ev in events:
-        if ev.startswith("partial_tp_1r"):
-            target = state.initial_qty * (1.0 - cfg.REDUCE_AT_1R_PCT)
-            if not _qty_already_at_target(clients, state, target):
-                _apply_target_qty(clients, state, target)
-            _after_partial_tp_ema(clients, state, "partial_tp_1r")
-        elif ev.startswith("partial_tp_2r"):
-            target = state.initial_qty * (1.0 - cfg.REDUCE_AT_1R_PCT - cfg.REDUCE_AT_2R_PCT)
-            if not _qty_already_at_target(clients, state, target):
-                _apply_target_qty(clients, state, target)
-            _after_partial_tp_ema(clients, state, "partial_tp_2r")
-        elif ev == "hedge_to_entry":
-            _replace_stop_algo(clients, state, state.entry_price)
-        elif ev == "hedge_to_1r":
-            plan = state.to_trade_plan()
-            _replace_stop_algo(clients, state, plan.stop_1r)
-        elif ev in ("stop_loss", "final_tp_10r"):
-            _finalize_position(clients, state)
-
-
-def _execute_donchian_events(clients: Any, state: LivePositionState, events: list[str]) -> None:
-    for ev in events:
-        if ev.startswith("partial_tp_2r"):
-            target = state.initial_qty * (1.0 - cfg.DONCHIAN_REDUCE_TP1_PCT)
-            if not _qty_already_at_target(clients, state, target):
-                _apply_target_qty(clients, state, target)
-            _after_partial_tp_donchian(clients, state, ev)
-        elif ev.startswith("partial_tp_5r"):
-            target = (
-                state.initial_qty
-                * (1.0 - cfg.DONCHIAN_REDUCE_TP1_PCT)
-                * (1.0 - cfg.DONCHIAN_REDUCE_TP2_PCT)
-            )
-            if not _qty_already_at_target(clients, state, target):
-                _apply_target_qty(clients, state, target)
-            _after_partial_tp_donchian(clients, state, ev)
-        elif ev == "hedge_to_entry":
-            _replace_stop_algo(clients, state, state.entry_price)
-        elif ev == "hedge_to_3r":
-            plan = state.to_trade_plan()
-            _replace_stop_algo(clients, state, plan.stop_3r)
-        elif ev in ("stop_loss", "final_tp_10r"):
-            _finalize_position(clients, state)
 
 
 def _tick_hunting_like(
@@ -423,6 +301,17 @@ def _tick_hunting(clients: Any, state: LivePositionState, high: float, low: floa
     )
 
 
+def _tick_hunting2(clients: Any, state: LivePositionState, high: float, low: float) -> None:
+    _tick_hunting_like(
+        clients,
+        state,
+        high,
+        low,
+        tp1_reduce=cfg.HUNTING2_TP1_REDUCE_PCT,
+        log_tag="hunting2",
+    )
+
+
 def _tick_smc(clients: Any, state: LivePositionState, high: float, low: float) -> None:
     _tick_hunting_like(
         clients,
@@ -433,32 +322,6 @@ def _tick_smc(clients: Any, state: LivePositionState, high: float, low: float) -
         log_tag="smc_ict",
     )
 
-
-def _tick_ema_or_donchian(
-    clients: Any,
-    state: LivePositionState,
-    high: float,
-    low: float,
-) -> None:
-    stop_before = state.stop
-    if state.strategy_id == "donchian":
-        pos = _build_donchian_position(state)
-        events = pos.on_bar(high, low)
-        _sync_position_state(state, pos)
-        _execute_donchian_events(clients, state, events)
-    else:
-        pos = _build_ema_position(state)
-        events = pos.on_bar(high, low)
-        _sync_position_state(state, pos)
-        _execute_ema_events(clients, state, events)
-
-    if (
-        state.trailing_active
-        and not state.closed
-        and state.stop != stop_before
-        and not any(e.startswith("partial_tp") or e.startswith("hedge") for e in events)
-    ):
-        _replace_stop_algo(clients, state, state.stop)
 
 
 def _sync_exchange_qty(clients: Any, state: LivePositionState) -> None:
@@ -498,10 +361,12 @@ def tick_position(
 
     if state.strategy_id == "hunting_funding":
         _tick_hunting(clients, state, high, low)
+    elif state.strategy_id == "hunting2":
+        _tick_hunting2(clients, state, high, low)
     elif state.strategy_id == "smc_ict":
         _tick_smc(clients, state, high, low)
     else:
-        _tick_ema_or_donchian(clients, state, high, low)
+        log.warning(f"未知策略持倉管理: {state.strategy_id}")
 
     return state
 

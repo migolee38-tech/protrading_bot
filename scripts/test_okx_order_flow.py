@@ -60,7 +60,7 @@ def run(account: str, *, execute: bool) -> int:
 
     req = OrderRequest(
         symbol="BTCUSDT",
-        strategy_id="ema",
+        strategy_id="hunting2",
         side="long",
         entry=65000.0,
         stop=63000.0,

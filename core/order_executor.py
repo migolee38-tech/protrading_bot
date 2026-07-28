@@ -369,9 +369,9 @@ def _signal_from_scan(
     bin_sym = sym.replace("/", "").upper()
     pos_size = float(getattr(plan, "position_size", 0) or 0)
     if mode == OrderMode.PAPER:
-        qty = pos_size if sid == "donchian" and pos_size > 0 else max(pos_size, 0.001)
+        qty = max(pos_size, 0.001) if pos_size > 0 else 0.001
     else:
-        qty = pos_size if sid == "donchian" and pos_size > 0 else 0.0
+        qty = 0.0
 
     return OrderRequest(
         symbol=bin_sym,

@@ -7,24 +7,6 @@ import pandas as pd
 import config as cfg
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    spans = {cfg.EMA_FAST, cfg.EMA_MID, cfg.EMA_SLOW, cfg.EMA_VOLUME_PRICE}
-    for span in spans:
-        out[f"ema{span}"] = out["close"].ewm(span=span, adjust=False).mean()
-
-    out["vol_ma20"] = out["volume"].rolling(cfg.VOLUME_MA).mean()
-    return out
-
-
-def add_donchian_channels(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    n = cfg.DONCHIAN_LEN
-    out["donchian_upper"] = out["high"].rolling(n).max()
-    out["donchian_lower"] = out["low"].rolling(n).min()
-    return out
-
-
 def add_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     out = df.copy()
     delta = out["close"].diff()
@@ -59,6 +41,17 @@ def min_bars_required() -> int:
             + cfg.HUNTING_LOOKBACK
             + 10
         )
+    if cfg.STRATEGY == "hunting2":
+        tf_min = max(cfg.timeframe_minutes(cfg.HUNTING2_TIMEFRAME), 1)
+        h4_chart_bars = max(1, 240 // tf_min) * cfg.HUNTING2_H4_BARS
+        return (
+            max(cfg.HUNTING2_HTF_EMA_LEN, cfg.HUNTING2_TREND_EMA_LEN)
+            + h4_chart_bars
+            + cfg.HUNTING2_SL_SWING
+            + cfg.HUNTING2_COOLDOWN_BARS
+            + cfg.HUNTING2_LOOKBACK
+            + 10
+        )
     if cfg.STRATEGY == "smc_ict":
         return (
             cfg.SMC_SWING_LEFT
@@ -68,7 +61,4 @@ def min_bars_required() -> int:
             + cfg.SMC_SWEEP_MAX_BARS
             + 20
         )
-    if cfg.STRATEGY == "donchian":
-        return cfg.DONCHIAN_LEN + cfg.DONCHIAN_ENTRY_EXPIRE_BARS + 8
-    warmup = max(cfg.EMA_SLOW, cfg.EMA_VOLUME_PRICE, cfg.VOLUME_MA) + 5
-    return cfg.TREND_BARS_MIN + cfg.STOP_LOOKBACK + warmup
+    return 200

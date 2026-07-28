@@ -77,13 +77,10 @@ def calc_order_quantity(
     settings: Any,
     leverage: int,
 ) -> float:
-    if strategy_id == "donchian" and position_size > 0:
-        qty = float(position_size)
-    elif entry <= 0:
+    if entry <= 0:
         return 0.0
-    else:
-        margin = settings.margin_per_trade
-        qty = margin * leverage / entry
+    margin = settings.margin_per_trade
+    qty = margin * leverage / entry
 
     sym = symbol.replace("/", "").upper()
     if is_okx():

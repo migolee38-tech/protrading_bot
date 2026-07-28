@@ -2,51 +2,11 @@
 
 DEFAULT_SYMBOL = "BTC/USDT"
 
-# --- EMA 趨勢交叉策略（勿與唐奇安共用下列參數）---
-STRATEGY = "ema"  # "ema" | "donchian" | "hunting_funding"
+# --- 預設策略（儀表板／CLI 單策略情境）---
+STRATEGY = "hunting2"  # "hunting_funding" | "hunting2" | "smc_ict"
 TIMEFRAME = "5m"
 
-EMA_FAST = 12
-EMA_MID = 30
-EMA_SLOW = 55
-EMA_CROSS_SLOW = 55
-EMA_VOLUME_PRICE = 20
-
-TREND_BARS_MIN = 48
-STOP_LOOKBACK = 48
-SOFT_STOP_PCT = 0.12
-MAX_STOP_PCT = 0.20
-STOP_BUFFER_PCT = 0.01
-
-VOLUME_MA = 20
-
-RR_FINAL = 10.0
-RR_PARTIAL_1 = 1.0
-RR_PARTIAL_2 = 2.0
-REDUCE_AT_1R_PCT = 0.30
-REDUCE_AT_2R_PCT = 0.30
-TRAIL_STEP_R = 0.5
-
-SL_WINDOW_HOURS = 24
-MAX_CONSECUTIVE_SL = 2
-COOLDOWN_HOURS = 24
-
 ALLOWED_SIDE: str | None = None
-
-# --- 唐奇安（唐安麒）策略專用；不影響上方 EMA 設定 ---
-DONCHIAN_TIMEFRAME = "1h"
-DONCHIAN_LEN = 100
-DONCHIAN_SL_BUFFER_PCT = 0.01
-DONCHIAN_MAX_SL_PCT = 0.10
-DONCHIAN_RISK_USDT = 2.0
-DONCHIAN_ENTRY_EXPIRE_BARS = 24
-DONCHIAN_RR_TP1 = 2.0
-DONCHIAN_RR_TP2 = 5.0
-DONCHIAN_RR_TP3 = 10.0
-DONCHIAN_REDUCE_TP1_PCT = 0.50
-DONCHIAN_REDUCE_TP2_PCT = 0.50
-DONCHIAN_STOP_AFTER_TP2_R = 3.0
-DONCHIAN_TRAIL_OFFSET_R = 2.0
 
 STATE_FILE = "state.json"
 
@@ -81,6 +41,42 @@ HUNTING_USE_DIRECTION_COOLDOWN = False
 HUNTING_MAX_CONSECUTIVE_SL_DIR = 2
 HUNTING_OI_MAX_HIST = 500          # Binance openInterestHist 單次上限
 
+# --- Hunting 2.0（Pine 更新版：五星 + EMA150 + 4H 收盤突破 + SL buffer）---
+HUNTING2_TIMEFRAME = "5m"
+HUNTING2_LOOKBACK = 4
+HUNTING2_MIN_STARS = 5
+HUNTING2_COOLDOWN_BARS = 24
+HUNTING2_USE_HTF = True
+HUNTING2_HTF_EMA_LEN = 150
+HUNTING2_TREND_EMA_LEN = 150
+HUNTING2_MAX_DIST_PCT = 7.0
+HUNTING2_USE_4H = True
+HUNTING2_H4_BARS = 15
+HUNTING2_SL_SWING = 24
+HUNTING2_MAX_SL_PCT = 10.0
+HUNTING2_SL_BUFFER_PCT = 1.0       # 止損預留緩衝 %（對應 Pine slBuffer）
+HUNTING2_TP1_REDUCE_PCT = 0.30
+HUNTING2_VOL_LEN = 20
+HUNTING2_MOM_LEN = 10
+HUNTING2_OI_MIN_PCT = 0.0
+HUNTING2_USE_OI = True
+HUNTING2_USE_CVD = True
+HUNTING2_USE_VOL = True
+HUNTING2_USE_TREND = True
+HUNTING2_USE_MOM = True
+HUNTING2_W_OI = 1.0
+HUNTING2_W_CVD = 1.0
+HUNTING2_W_VOL = 1.0
+HUNTING2_W_TREND = 1.0
+HUNTING2_W_MOM = 1.0
+HUNTING2_TOTAL_CAPITAL = 100.0
+HUNTING2_POSITION_PCT = 1.0
+HUNTING2_MAX_CONCURRENT_POSITIONS = 20
+HUNTING2_MAX_MARGIN_USAGE_PCT = 85.0
+HUNTING2_USE_DIRECTION_COOLDOWN = False
+HUNTING2_MAX_CONSECUTIVE_SL_DIR = 2
+HUNTING2_OI_MAX_HIST = 500
+
 # --- SMC / ICT（15m · BOS + Liquidity Sweep + Order Block）---
 SMC_TIMEFRAME = "15m"
 SMC_SWING_LEFT = 2
@@ -101,11 +97,11 @@ SMC_POSITION_PCT = 1.0
 
 
 def active_timeframe() -> str:
-    """依目前 STRATEGY 回傳對應週期（EMA 用 TIMEFRAME，唐奇安用 DONCHIAN_TIMEFRAME）。"""
-    if STRATEGY == "donchian":
-        return DONCHIAN_TIMEFRAME
+    """依目前 STRATEGY 回傳對應週期。"""
     if STRATEGY == "hunting_funding":
         return HUNTING_FUNDING_TIMEFRAME
+    if STRATEGY == "hunting2":
+        return HUNTING2_TIMEFRAME
     if STRATEGY == "smc_ict":
         return SMC_TIMEFRAME
     return TIMEFRAME
@@ -120,4 +116,4 @@ def timeframe_minutes(timeframe: str | None = None) -> int:
         return int(tf[:-1]) * 60
     if tf.endswith("d"):
         return int(tf[:-1]) * 1440
-    raise ValueError(f"不支援的時間週期: {tf}")
+    raise ValueError(f"無法解析 timeframe: {tf}")

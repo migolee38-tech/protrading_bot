@@ -1,3 +1,3 @@
-from strategies.ema_trend_cross import Signal, evaluate_bar, scan_signals
+"""策略套件：具體策略請由 core.strategy_registry 載入。"""
 
-__all__ = ["Signal", "evaluate_bar", "scan_signals"]
+__all__: list[str] = []

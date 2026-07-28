@@ -127,9 +127,8 @@ def markers_for_strategies(prep_for_tf: pd.DataFrame, strategy_ids: list[str]) -
     out: list[dict[str, Any]] = []
 
     strat_labels = {
-        "ema": "E",
-        "donchian": "D",
         "hunting_funding": "H",
+        "hunting2": "H2",
         "smc_ict": "S",
     }
 
@@ -139,6 +138,10 @@ def markers_for_strategies(prep_for_tf: pd.DataFrame, strategy_ids: list[str]) -
             continue
         if sid == "hunting_funding":
             from strategies.hunting_funding import scan_raw_signals
+
+            sigs = scan_raw_signals(prep_for_tf)
+        elif sid == "hunting2":
+            from strategies.hunting2 import scan_raw_signals
 
             sigs = scan_raw_signals(prep_for_tf)
         elif sid == "smc_ict":

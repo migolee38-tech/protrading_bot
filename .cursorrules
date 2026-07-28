@@ -4,7 +4,7 @@
 ## 本專案現況（必讀）
 
 - **交易所**：以 **OKX** 為主（`EXCHANGE=okx`）；沿用 `core/okx_*`、`core/exchange_*` 抽象層，勿引入 Bybit 或重複造輪。
-- **既有策略**：EMA 趨勢交叉、唐奇安、Hunting Funding — **不得破壞或重寫**，除非使用者明確要求。
+- **既有策略**：Hunting Funding、Hunting 2.0、SMC / ICT — **不得破壞或重寫**，除非使用者明確要求。
 - **新策略**：必須註冊至 `core/strategy_registry.py`，並與 `live_runner.py`、`RUNNER_STRATEGIES` 環境變數相容。
 - **部署**：本機用 `.env` + `load_project_env()`；Zeabur 用 Variables（服務 1 = Streamlit，服務 2 = runner）。
 

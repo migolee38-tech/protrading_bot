@@ -235,8 +235,6 @@ def calc_order_quantity(
     settings: FuturesSettings,
     leverage: int,
 ) -> float:
-    if strategy_id == "donchian" and position_size > 0:
-        return position_size
     if entry <= 0:
         return 0.0
     margin = settings.margin_per_trade
