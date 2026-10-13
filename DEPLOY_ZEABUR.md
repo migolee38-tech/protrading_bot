@@ -97,8 +97,13 @@ git push
 
 Redeploy 後 runner Logs 應有 `RUNNER_STRATEGIES='hunting_funding' → 策略：Hunting Funding`；若仍列出四策略，確認變數設在 **本 runner 服務** 而非僅 Streamlit。
 
-勿在 runner 服務設 `ZBPACK_START_COMMAND` 覆寫成 `--verify-only`（驗完即退出）。  
-`APP_LOGIN_PASSWORD` 僅 Streamlit 需要，runner 不必設。
+勿在 runner 服務設 `ZBPACK_START_COMMAND`（或自訂 Start Command）覆寫 Dockerfile：  
+若寫死 `--strategies hunting2`，會與 Variables 的 `RUNNER_STRATEGIES` 衝突；程式現改以 Variables 為準，但仍建議**清空自訂啟動指令**，讓 `Dockerfile.runner` 生效。  
+勿設成 `--verify-only`（驗完即退出）。  
+`APP_LOGIN_PASSWORD` 僅 Streamlit 需要，runner 不必設。  
+
+Redeploy 後 Logs 應類似：`RUNNER_STRATEGIES='ivb_orderflow' → 策略 ID：['ivb_orderflow']（IVB Order Flow）`。  
+若仍顯示 Hunting 2.0，代表映像過舊或 Start Command 未清乾淨。
 
 ### 幣安 API（選用，`EXCHANGE=binance` 時）
 

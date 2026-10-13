@@ -280,7 +280,8 @@ def run_loop(cfg: RunnerConfig) -> None:
         if not verify_futures_connection(pcfg.futures):
             raise SystemExit(1)
 
-    names = ", ".join(get_strategy(s).name for s in cfg.profiles[0].strategy_ids)
+    ids = cfg.profiles[0].strategy_ids
+    names = ", ".join(get_strategy(s).name for s in ids)
     profile_names = ", ".join(p.profile.display_name for p in cfg.profiles)
     raw_strategies = os.getenv("RUNNER_STRATEGIES")
     log.info(
@@ -288,7 +289,7 @@ def run_loop(cfg: RunnerConfig) -> None:
         f"每 {cfg.scan_interval_sec}s 一輪"
     )
     log.info(
-        f"RUNNER_STRATEGIES={raw_strategies!r} → 策略：{names}"
+        f"RUNNER_STRATEGIES={raw_strategies!r} → 策略 ID：{ids}（{names}）"
     )
 
     while True:
@@ -327,8 +328,23 @@ def _resolve_profiles(args: argparse.Namespace) -> list[AccountProfile]:
 
 
 def _resolve_strategy_ids(cli_strategies: str | None) -> list[str]:
-    """CLI --strategies 優先；未指定時讀 RUNNER_STRATEGIES；皆無則 all。"""
-    spec = (cli_strategies or env_value("RUNNER_STRATEGIES") or "all").strip()
+    """
+    解析策略清單。
+    Zeabur Variables 的 RUNNER_STRATEGIES 優先於 CLI --strategies，
+    避免平台自訂 Start Command 寫死舊策略卻與 Variables 不一致。
+    """
+    env_spec = (env_value("RUNNER_STRATEGIES") or "").strip()
+    cli_spec = (cli_strategies or "").strip()
+    if env_spec:
+        spec = env_spec
+        if cli_spec and cli_spec != env_spec:
+            log.warning(
+                "RUNNER_STRATEGIES=%r 與 CLI --strategies=%r 不一致，改以 Variables 為準",
+                env_spec,
+                cli_spec,
+            )
+    else:
+        spec = cli_spec or "all"
     if spec.lower() == "all":
         return list(_ALL_STRATEGY_IDS)
     strategy_ids = [s.strip() for s in spec.split(",") if s.strip()]
