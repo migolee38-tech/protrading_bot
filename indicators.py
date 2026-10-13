@@ -61,4 +61,8 @@ def min_bars_required() -> int:
             + cfg.SMC_SWEEP_MAX_BARS
             + 20
         )
+    if cfg.STRATEGY == "ivb_orderflow":
+        tf_min = max(cfg.timeframe_minutes(cfg.IVB_TIMEFRAME), 1)
+        ib_bars = max(cfg.IVB_MIN_IB_BARS, cfg.IVB_MINUTES // tf_min)
+        return ib_bars + cfg.IVB_ATR_LEN + cfg.IVB_VOL_MA_LEN + cfg.IVB_COOLDOWN_BARS + 40
     return 200

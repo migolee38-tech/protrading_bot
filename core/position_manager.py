@@ -108,6 +108,12 @@ def place_entry_protection(clients: Any, state: LivePositionState) -> None:
         _place_tp_algo(clients, state, state.tp_1r, tp1)
         if rest > 0:
             _place_tp_algo(clients, state, state.tp_final, rest)
+    elif state.strategy_id == "ivb_orderflow":
+        tp1 = state.initial_qty * cfg.IVB_TP1_REDUCE_PCT
+        rest = max(0.0, state.remaining_qty - tp1)
+        _place_tp_algo(clients, state, state.tp_1r, tp1)
+        if rest > 0:
+            _place_tp_algo(clients, state, state.tp_final, rest)
 
 
 def register_live_position(
@@ -323,6 +329,16 @@ def _tick_smc(clients: Any, state: LivePositionState, high: float, low: float) -
     )
 
 
+def _tick_ivb(clients: Any, state: LivePositionState, high: float, low: float) -> None:
+    _tick_hunting_like(
+        clients,
+        state,
+        high,
+        low,
+        tp1_reduce=cfg.IVB_TP1_REDUCE_PCT,
+        log_tag="ivb_orderflow",
+    )
+
 
 def _sync_exchange_qty(clients: Any, state: LivePositionState) -> None:
     qty = exchange_position_qty(clients, state.symbol, state.side)
@@ -365,6 +381,8 @@ def tick_position(
         _tick_hunting2(clients, state, high, low)
     elif state.strategy_id == "smc_ict":
         _tick_smc(clients, state, high, low)
+    elif state.strategy_id == "ivb_orderflow":
+        _tick_ivb(clients, state, high, low)
     else:
         log.warning(f"未知策略持倉管理: {state.strategy_id}")
 

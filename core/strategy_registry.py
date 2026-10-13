@@ -30,6 +30,10 @@ class StrategyMeta:
             from strategies.smc_ict import prepare_dataframe
 
             return prepare_dataframe(raw)
+        if self.id == "ivb_orderflow":
+            from strategies.ivb_orderflow import prepare_dataframe
+
+            return prepare_dataframe(raw)
         return raw.copy()
 
     def min_bars(self) -> int:
@@ -77,6 +81,12 @@ STRATEGIES: dict[str, StrategyMeta] = {
         description="15m BOS + Liquidity Sweep + Order Block 回踩 · 1R減倉30% · 5R全出",
         timeframe=cfg.SMC_TIMEFRAME,
     ),
+    "ivb_orderflow": StrategyMeta(
+        id="ivb_orderflow",
+        name="IVB Order Flow",
+        description="NY IB30 突破 + VP(POC/VA) 回踩 + Absorption · personal 0.35%/2R",
+        timeframe=cfg.IVB_TIMEFRAME,
+    ),
 }
 
 
@@ -104,6 +114,10 @@ def scan_signals_for(strategy_id: str, df: pd.DataFrame) -> list:
             return scan_signals(df)
         if strategy_id == "smc_ict":
             from strategies.smc_ict import scan_signals
+
+            return scan_signals(df)
+        if strategy_id == "ivb_orderflow":
+            from strategies.ivb_orderflow import scan_signals
 
             return scan_signals(df)
     return []

@@ -154,6 +154,66 @@ def build_smc_trade_plan(
     )
 
 
+def build_ivb_trade_plan(
+    side: str,
+    entry: float,
+    stop_ref: float,
+    ib_range: float = 0.0,
+    *,
+    apply_buffer: bool = True,
+) -> TradePlan | None:
+    """
+    IVB Order Flow：結構止損（VA / zone 外側）+ personal 風控幾何。
+    tp_1r=1R 減倉；tp_2r / tp_final = protection（預設 2R）。
+    """
+    buf = cfg.IVB_SL_BUFFER_PCT if apply_buffer else 0.0
+    if side == "long":
+        stop = float(stop_ref) * (1.0 - buf)
+        if stop >= entry:
+            stop = entry * (1.0 - cfg.IVB_FALLBACK_SL_PCT / 100.0)
+    else:
+        stop = float(stop_ref) * (1.0 + buf)
+        if stop <= entry:
+            stop = entry * (1.0 + cfg.IVB_FALLBACK_SL_PCT / 100.0)
+
+    risk = _risk_pct(entry, stop, side)
+    if risk > cfg.IVB_MAX_SL_PCT / 100.0:
+        return None
+    r = abs(entry - stop)
+    if r <= 0:
+        return None
+
+    # 可選：IB 高度投影作為 protection 上限參考（不強制縮短 TP）
+    _ = ib_range
+
+    rr1 = cfg.IVB_RR_TP1
+    rr2 = cfg.IVB_RR_TP2
+    rr_final = cfg.IVB_RR_FINAL
+    if side == "long":
+        tp_1r = entry + rr1 * r
+        tp_2r = entry + rr2 * r
+        tp_final = entry + rr_final * r
+    else:
+        tp_1r = entry - rr1 * r
+        tp_2r = entry - rr2 * r
+        tp_final = entry - rr_final * r
+
+    risk_dollars = cfg.IVB_TOTAL_CAPITAL * cfg.IVB_RISK_PCT_PER_TRADE / 100.0
+    size = risk_dollars / r if r > 0 else 0.0
+    return TradePlan(
+        side=side,
+        entry=entry,
+        stop=stop,
+        r=r,
+        tp_1r=tp_1r,
+        tp_2r=tp_2r,
+        tp_final=tp_final,
+        stop_source="ivb_va_zone",
+        risk_pct=risk,
+        position_size=size,
+    )
+
+
 def recalc_plan_for_fill(plan: TradePlan, fill_entry: float, strategy_id: str) -> TradePlan:
     """以實際成交價重算 R 與止盈（止損價不變）。"""
     stop = plan.stop
@@ -175,6 +235,8 @@ def recalc_plan_for_fill(plan: TradePlan, fill_entry: float, strategy_id: str) -
 
     if strategy_id == "smc_ict":
         rr1, rr2, rr_final = 1.0, cfg.SMC_RR_TP2, cfg.SMC_RR_TP3
+    elif strategy_id == "ivb_orderflow":
+        rr1, rr2, rr_final = cfg.IVB_RR_TP1, cfg.IVB_RR_TP2, cfg.IVB_RR_FINAL
     elif strategy_id in ("hunting_funding", "hunting2"):
         rr1, rr2, rr_final = 1.0, 3.0, 5.0
     else:

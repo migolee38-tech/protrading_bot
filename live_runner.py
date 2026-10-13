@@ -2,13 +2,14 @@
 """
 多策略 24/7 自動交易 — 多帳戶單進程輪詢
 
-策略：Hunting Funding、Hunting 2.0、SMC / ICT（可用 RUNNER_STRATEGIES 或 --strategies 篩選）
+策略：Hunting Funding、Hunting 2.0、SMC / ICT、IVB Order Flow
+（可用 RUNNER_STRATEGIES 或 --strategies 篩選）
 
 用法：
   python live_runner.py --verify-only --profiles all
   python live_runner.py --profiles all
   RUNNER_STRATEGIES=hunting2 python live_runner.py --profiles all
-  RUNNER_STRATEGIES=hunting_funding python live_runner.py --profiles all
+  RUNNER_STRATEGIES=ivb_orderflow python live_runner.py --profiles all
   python live_runner.py --profiles account1:testnet,account2:testnet
   python live_runner.py --exec testnet          # 向後相容：僅 account1
 """
@@ -48,6 +49,7 @@ from core.exchange_config import active_exchange, is_okx
 from core.market_data import MarketType, fetch_klines
 from core.order_executor import OrderMode, OrderRequest, place_order
 from core.position_manager import manage_positions_for_profile
+import config as app_cfg
 from core.strategy_registry import STRATEGIES, get_strategy, scan_signals_for, with_symbol
 from core.universe import top_usdt_pairs_by_volume
 
@@ -141,9 +143,25 @@ def _filter_tradable_symbols(symbols: list[str], cfg: ProfileRunnerConfig) -> li
     return filtered
 
 
+def _symbols_for_strategy(sid: str, universe: list[str]) -> list[str]:
+    """IVB 僅交易設定清單；其餘策略用完整榜單。"""
+    if sid != "ivb_orderflow":
+        return universe
+    allowed = {s.replace("/", "").upper() for s in app_cfg.IVB_SYMBOLS}
+    out = [s for s in universe if s.replace("/", "").upper() in allowed]
+    have = {s.replace("/", "").upper() for s in out}
+    for raw in app_cfg.IVB_SYMBOLS:
+        sym = raw.replace("/", "").upper()
+        if sym not in have:
+            # 榜單缺漏時仍掃描（例如 SOL 偶發掉出 top_n）
+            out.append(sym if "/" not in raw else raw)
+            have.add(sym)
+    return out
+
+
 def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
     symbols = _filter_tradable_symbols(_resolve_symbols(cfg.top_n), cfg)
-    if not symbols:
+    if not symbols and "ivb_orderflow" not in cfg.strategy_ids:
         log.warning(f"[{cfg.profile.display_name}] 榜單為空，略過本輪。")
         return []
 
@@ -155,71 +173,75 @@ def _scan_round_for_profile(cfg: ProfileRunnerConfig) -> list[dict]:
     placed: list[dict] = []
     assert cfg.futures is not None
 
-    for sym in symbols:
-        bin_sym = sym.replace("/", "").upper()
-        for sid in cfg.strategy_ids:
-            meta = get_strategy(sid)
-            try:
-                raw = fetch_klines(
-                    bin_sym,
-                    interval=meta.timeframe,
-                    limit=cfg.kline_limit,
-                    market=cfg.market,
-                )
-            except Exception as e:
-                log.debug(f"[{cfg.profile.profile_id}] {bin_sym} {sid} K線失敗: {e}")
-                continue
+    # 依策略展開 symbol，避免 IVB 對百檔無效拉 K
+    scan_pairs: list[tuple[str, str]] = []
+    for sid in cfg.strategy_ids:
+        for sym in _symbols_for_strategy(sid, symbols):
+            scan_pairs.append((sid, sym.replace("/", "").upper()))
 
-            prep = meta.prepare_df(with_symbol(raw, bin_sym, kline_limit=cfg.kline_limit))
-            signals = scan_signals_for(sid, prep)
-            if not signals:
-                continue
-
-            last = signals[-1]
-            if not _is_fresh_signal(last.bar_index, len(prep)):
-                continue
-
-            key = _signal_key(sid, bin_sym, last.bar_index)
-            if key in executed:
-                continue
-            if float(cooldowns.get(key, 0) or 0) > now:
-                continue
-
-            plan = last.plan
-            tp = getattr(plan, "tp_final", None)
-            pos_size = float(getattr(plan, "position_size", 0) or 0)
-            if order_mode == OrderMode.PAPER:
-                qty = max(pos_size, 0.001) if pos_size > 0 else 0.001
-            else:
-                qty = 0.0
-
-            req = OrderRequest(
-                symbol=bin_sym,
-                strategy_id=sid,
-                side=last.side,
-                entry=float(plan.entry),
-                stop=float(plan.stop),
-                quantity=qty,
-                mode=order_mode,
-                account_id=cfg.profile.account_id,
-                order_type="market",
-                price=float(plan.entry),
-                leverage=cfg.futures.leverage,
-                take_profit=tp if tp and tp > 0 else None,
-                trade_plan=plan,
+    for sid, bin_sym in scan_pairs:
+        meta = get_strategy(sid)
+        try:
+            raw = fetch_klines(
+                bin_sym,
+                interval=meta.timeframe,
+                limit=cfg.kline_limit,
+                market=cfg.market,
             )
-            try:
-                row = place_order(req, market=cfg.market)
-                placed.append(row)
-                executed[key] = row["created_at"]
-                log.info(f"[{cfg.profile.display_name}] {sid} {bin_sym} {last.side}")
-            except Exception as e:
-                log.error(
-                    f"[{cfg.profile.display_name}] {sid} {bin_sym} 下單失敗: "
-                    f"{format_exchange_error(e)}"
-                )
-                if is_transient_exchange_error(e):
-                    cooldowns[key] = time.time() + _TRANSIENT_ORDER_COOLDOWN_SEC
+        except Exception as e:
+            log.debug(f"[{cfg.profile.profile_id}] {bin_sym} {sid} K線失敗: {e}")
+            continue
+
+        prep = meta.prepare_df(with_symbol(raw, bin_sym, kline_limit=cfg.kline_limit))
+        signals = scan_signals_for(sid, prep)
+        if not signals:
+            continue
+
+        last = signals[-1]
+        if not _is_fresh_signal(last.bar_index, len(prep)):
+            continue
+
+        key = _signal_key(sid, bin_sym, last.bar_index)
+        if key in executed:
+            continue
+        if float(cooldowns.get(key, 0) or 0) > now:
+            continue
+
+        plan = last.plan
+        tp = getattr(plan, "tp_final", None)
+        pos_size = float(getattr(plan, "position_size", 0) or 0)
+        if order_mode == OrderMode.PAPER:
+            qty = max(pos_size, 0.001) if pos_size > 0 else 0.001
+        else:
+            qty = 0.0
+
+        req = OrderRequest(
+            symbol=bin_sym,
+            strategy_id=sid,
+            side=last.side,
+            entry=float(plan.entry),
+            stop=float(plan.stop),
+            quantity=qty,
+            mode=order_mode,
+            account_id=cfg.profile.account_id,
+            order_type="market",
+            price=float(plan.entry),
+            leverage=cfg.futures.leverage,
+            take_profit=tp if tp and tp > 0 else None,
+            trade_plan=plan,
+        )
+        try:
+            row = place_order(req, market=cfg.market)
+            placed.append(row)
+            executed[key] = row["created_at"]
+            log.info(f"[{cfg.profile.display_name}] {sid} {bin_sym} {last.side}")
+        except Exception as e:
+            log.error(
+                f"[{cfg.profile.display_name}] {sid} {bin_sym} 下單失敗: "
+                f"{format_exchange_error(e)}"
+            )
+            if is_transient_exchange_error(e):
+                cooldowns[key] = time.time() + _TRANSIENT_ORDER_COOLDOWN_SEC
 
     if len(executed) > 5000:
         executed = dict(list(executed.items())[-3000:])

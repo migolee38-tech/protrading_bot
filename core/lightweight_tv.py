@@ -130,6 +130,7 @@ def markers_for_strategies(prep_for_tf: pd.DataFrame, strategy_ids: list[str]) -
         "hunting_funding": "H",
         "hunting2": "H2",
         "smc_ict": "S",
+        "ivb_orderflow": "IVB",
     }
 
     for sid in strategy_ids:
@@ -146,6 +147,10 @@ def markers_for_strategies(prep_for_tf: pd.DataFrame, strategy_ids: list[str]) -
             sigs = scan_raw_signals(prep_for_tf)
         elif sid == "smc_ict":
             from strategies.smc_ict import scan_raw_signals
+
+            sigs = scan_raw_signals(prep_for_tf)
+        elif sid == "ivb_orderflow":
+            from strategies.ivb_orderflow import scan_raw_signals
 
             sigs = scan_raw_signals(prep_for_tf)
         else:

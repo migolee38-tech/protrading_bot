@@ -3,7 +3,7 @@
 DEFAULT_SYMBOL = "BTC/USDT"
 
 # --- 預設策略（儀表板／CLI 單策略情境）---
-STRATEGY = "hunting2"  # "hunting_funding" | "hunting2" | "smc_ict"
+STRATEGY = "hunting2"  # "hunting_funding" | "hunting2" | "smc_ict" | "ivb_orderflow"
 TIMEFRAME = "5m"
 
 ALLOWED_SIDE: str | None = None
@@ -95,6 +95,39 @@ SMC_RR_TP3 = 5.0
 SMC_TOTAL_CAPITAL = 100.0
 SMC_POSITION_PCT = 1.0
 
+# --- IVB Order Flow（NY Initial Balance + VP + Absorption proxy）---
+IVB_TIMEFRAME = "5m"
+IVB_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+IVB_MINUTES = 30                      # Initial Balance 分鐘數
+IVB_SESSION = "NY"                    # NY | UTC（UTC 時用 IVB_UTC_*）
+IVB_NY_OPEN = "09:30"                 # America/New_York
+IVB_NY_CLOSE = "16:00"
+IVB_UTC_OPEN = "13:30"                # 若 SESSION=UTC
+IVB_UTC_CLOSE = "20:00"
+IVB_VP_BINS = 24
+IVB_VA_PCT = 0.70
+IVB_MIN_IB_BARS = 3
+IVB_COOLDOWN_BARS = 6
+IVB_MAX_ENTRIES_PER_DAY = 2
+IVB_MAX_CONCURRENT = 1
+IVB_ZONE_PAD_PCT = 0.05
+IVB_ATR_LEN = 14
+IVB_VOL_MA_LEN = 20
+IVB_ABS_VOL_MULT = 2.0                # absorption：量能相對均量
+IVB_ABS_RANGE_ATR = 0.35              # absorption：振幅相對 ATR
+IVB_SL_BUFFER_PCT = 0.01
+IVB_FALLBACK_SL_PCT = 0.35
+IVB_MAX_SL_PCT = 3.0
+IVB_TP1_REDUCE_PCT = 0.30
+IVB_RR_TP1 = 1.0
+IVB_RR_TP2 = 2.0                      # protection（personal）
+IVB_RR_FINAL = 2.0
+IVB_RISK_PROFILE = "personal"
+IVB_TOTAL_CAPITAL = 100.0
+IVB_RISK_PCT_PER_TRADE = 0.35         # personal：單筆風險約 0.35%
+IVB_ALLOW_LONG = True
+IVB_ALLOW_SHORT = True
+
 
 def active_timeframe() -> str:
     """依目前 STRATEGY 回傳對應週期。"""
@@ -104,6 +137,8 @@ def active_timeframe() -> str:
         return HUNTING2_TIMEFRAME
     if STRATEGY == "smc_ict":
         return SMC_TIMEFRAME
+    if STRATEGY == "ivb_orderflow":
+        return IVB_TIMEFRAME
     return TIMEFRAME
 
 
