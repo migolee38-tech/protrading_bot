@@ -89,7 +89,9 @@ from core.order_executor import (
     scan_and_execute,
 )
 from core.strategy_registry import STRATEGIES, scan_signals_for, with_symbol
+import config as app_cfg
 from strategies.hunting_funding import load_oi_status
+from strategies.ivb_orderflow import compute_bar_results, run_dashboard_backtest
 from core.universe import top_usdt_pairs_by_volume, universe_price_source_label
 
 REPORTS_DIR = Path(__file__).parent / "data" / "reports"
@@ -973,6 +975,185 @@ def _main_workstation(
             )
 
 
+def _ivb_symbol_options() -> list[str]:
+    return [s.replace("/", "").upper() for s in app_cfg.IVB_SYMBOLS]
+
+
+def _tab_ivb_orderflow(market: MarketType, kline_limit: int) -> None:
+    """IVB Order Flow 專頁：NY IB30 + VP 回踩 + Absorption proxy。"""
+    sid = "ivb_orderflow"
+    if sid not in STRATEGIES:
+        st.error("策略未註冊：ivb_orderflow")
+        return
+
+    meta = STRATEGIES[sid]
+    st.subheader("IVB Order Flow")
+    st.caption(
+        "Fabio 風格 Initial Balance 突破 · Volume Profile 定區 · Absorption 確認 · "
+        f"時段 `{app_cfg.IVB_SESSION}` · IB `{app_cfg.IVB_MINUTES}m` · "
+        f"風險 `{app_cfg.IVB_RISK_PROFILE}` ({app_cfg.IVB_RISK_PCT_PER_TRADE}%/筆 · "
+        f"TP {app_cfg.IVB_RR_FINAL:g}R)"
+    )
+
+    opts = _ivb_symbol_options()
+    default_sym = st.session_state.selected_symbol.replace("/", "").upper()
+    default_i = opts.index(default_sym) if default_sym in opts else 0
+
+    c1, c2, c3 = st.columns([1.4, 1.2, 1.2])
+    with c1:
+        sym = st.selectbox("標的（IVB 宇宙）", opts, index=default_i, key="ivb_tab_symbol")
+    with c2:
+        tf = st.selectbox(
+            "K 線週期",
+            [meta.timeframe, "1m", "5m", "15m"],
+            index=0,
+            key="ivb_tab_tf",
+        )
+    with c3:
+        mkt: MarketType = st.selectbox(
+            "市場",
+            ["futures", "spot"],
+            format_func=lambda x: "永續" if x == "futures" else "現貨",
+            index=0 if market == "futures" else 1,
+            key="ivb_tab_market",
+        )
+
+    pair = f"{sym.replace('USDT', '')}/USDT" if sym.endswith("USDT") else sym
+    st.session_state.selected_symbol = sym
+    st.session_state.selected_pair = pair
+
+    if st.button("重新載入 IVB 資料", key="ivb_tab_refresh"):
+        st.cache_data.clear()
+        st.rerun()
+
+    try:
+        raw, _ = _cached_klines(sym, tf, max(kline_limit, 400), mkt)
+    except Exception as exc:
+        st.error(f"無法載入 K 線：{exc}")
+        return
+
+    prep = meta.prepare_df(with_symbol(raw, sym, kline_limit=kline_limit))
+    bars = compute_bar_results(prep)
+    sigs = scan_signals_for(sid, prep)
+
+    last_sess = next((b for b in reversed(bars) if b.ib_high > 0), None)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    if last_sess is not None:
+        m1.metric("IB High", f"{last_sess.ib_high:.4g}")
+        m2.metric("IB Low", f"{last_sess.ib_low:.4g}")
+        m3.metric("POC", f"{last_sess.poc:.4g}" if last_sess.poc else "—")
+        m4.metric("VAH", f"{last_sess.vah:.4g}" if last_sess.vah else "—")
+        m5.metric("VAL", f"{last_sess.val:.4g}" if last_sess.val else "—")
+        bias = "—"
+        for b in reversed(bars):
+            if b.long_sig:
+                bias = "long（訊號）"
+                break
+            if b.short_sig:
+                bias = "short（訊號）"
+                break
+            if b.ib_high > 0 and b.close > b.ib_high:
+                bias = "long bias"
+                break
+            if b.ib_high > 0 and b.close < b.ib_low:
+                bias = "short bias"
+                break
+        st.caption(
+            f"最近 session 方向推估：`{bias}` · "
+            f"Reload 區 [{last_sess.zone_low:.4g}, {last_sess.zone_high:.4g}]"
+            if last_sess.zone_high > 0
+            else f"最近 session 方向推估：`{bias}`（尚未形成回踩區）"
+        )
+    else:
+        st.info("目前資料尚未形成完整 NY IB（需覆蓋開盤後至少 30 分鐘）。")
+
+    st.markdown("#### 圖表（僅 IVB 訊號）")
+    try:
+        candles, volumes = df_to_tv_series(prep)
+        markers = markers_for_strategies(prep, [sid])
+        html_doc = build_lightweight_chart_html(
+            candles=candles,
+            volumes=volumes,
+            markers=markers,
+            ema150=df_to_ema_line(prep),
+            title=f"{pair} · {tf} · IVB Order Flow",
+            symbol=sym,
+            chart_interval=tf,
+            market=mkt,
+            use_live=False,
+            chart_height=520,
+            show_price_header=False,
+        )
+        components.html(html_doc, height=600, scrolling=False)
+    except Exception as exc:
+        st.warning(f"圖表繪製失敗：{exc}")
+
+    left, right = st.columns([1.2, 1])
+    with left:
+        st.markdown("#### 最近訊號")
+        if not sigs:
+            st.caption("尚無進場訊號（可能仍在 IB 內、未突破，或回踩未確認）。")
+        else:
+            rows = []
+            for s in sigs[-20:]:
+                rows.append(
+                    {
+                        "bar": s.bar_index,
+                        "side": s.side,
+                        "entry": round(float(s.entry), 6),
+                        "stop": round(float(s.plan.stop), 6),
+                        "tp": round(float(s.plan.tp_final), 6),
+                        "risk_%": round(float(s.plan.risk_pct) * 100, 2),
+                        "size": round(float(s.plan.position_size), 6),
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    with right:
+        st.markdown("#### 本頁回測")
+        if st.button("執行 IVB 回測", type="primary", key="ivb_tab_bt"):
+            with st.spinner("IVB 回測中…"):
+                try:
+                    stats = run_dashboard_backtest(prep)
+                    st.session_state["ivb_tab_bt"] = stats
+                except Exception as exc:
+                    st.error(str(exc))
+                    return
+        stats = st.session_state.get("ivb_tab_bt")
+        if stats:
+            a, b, c, d = st.columns(4)
+            a.metric("訊號數", stats.get("signal_count", 0))
+            b.metric("開倉數", stats.get("open_count", 0))
+            c.metric("勝率", f"{float(stats.get('win_rate', 0)) * 100:.1f}%")
+            d.metric(
+                "總盈虧",
+                f"{float(stats.get('total_pnl_usdt', 0) or 0):.4f}",
+            )
+            with st.expander("事件日誌"):
+                ev = stats.get("events") or []
+                st.code("\n".join(ev[-50:]) if ev else "無")
+        else:
+            st.caption("按上方按鈕後顯示勝率與盈虧。")
+
+    with st.expander("參數（config.IVB_*）", expanded=False):
+        st.code(
+            "\n".join(
+                [
+                    f"IVB_SYMBOLS={app_cfg.IVB_SYMBOLS}",
+                    f"IVB_TIMEFRAME={app_cfg.IVB_TIMEFRAME}",
+                    f"IVB_MINUTES={app_cfg.IVB_MINUTES}",
+                    f"IVB_SESSION={app_cfg.IVB_SESSION}",
+                    f"IVB_NY_OPEN={app_cfg.IVB_NY_OPEN} / CLOSE={app_cfg.IVB_NY_CLOSE}",
+                    f"IVB_RISK_PCT_PER_TRADE={app_cfg.IVB_RISK_PCT_PER_TRADE}",
+                    f"IVB_RR_FINAL={app_cfg.IVB_RR_FINAL}",
+                    f"IVB_ABS_VOL_MULT={app_cfg.IVB_ABS_VOL_MULT}",
+                    f"IVB_ABS_RANGE_ATR={app_cfg.IVB_ABS_RANGE_ATR}",
+                    "Runner: RUNNER_STRATEGIES=ivb_orderflow",
+                ]
+            )
+        )
+
+
 def _tab_backtest(strategy_ids: list[str], market: MarketType, kline_limit: int) -> None:
     """5/20 初版：策略回測覆盤（英文欄位 DataFrame，避免編碼問題）。"""
     st.subheader("策略回測覆盤")
@@ -1617,8 +1798,15 @@ def main() -> None:
     )
     st.session_state.market = market
 
-    tab_main, tab_bt, tab_live, tab_testnet, tab_paper = st.tabs(
-        ["主工作站", "回測覆盤", "實盤帳戶", "Testnet 帳戶", "本地模擬賬戶"]
+    tab_main, tab_ivb, tab_bt, tab_live, tab_testnet, tab_paper = st.tabs(
+        [
+            "主工作站",
+            "IVB Order Flow",
+            "回測覆盤",
+            "實盤帳戶",
+            "Testnet 帳戶",
+            "本地模擬賬戶",
+        ]
     )
 
     with tab_main:
@@ -1634,6 +1822,9 @@ def main() -> None:
             universe_df,
         )
         _show_market_source_banner()
+
+    with tab_ivb:
+        _tab_ivb_orderflow(market, kline_limit)
 
     with tab_bt:
         strategy_ids = st.session_state.get("active_strategy_ids") or list(STRATEGIES.keys())

@@ -91,7 +91,7 @@ git push
 |------|------|
 | `EXCHANGE` | **`okx`**（或 binance） |
 | `RUNNER_PROFILES` | 例如 `account1:testnet,account2:testnet` |
-| `RUNNER_STRATEGIES` | 例如 `hunting_funding`（只跑 Hunting）；未設或 `all` = 全部策略 |
+| `RUNNER_STRATEGIES` | 例如 `hunting_funding` 或 `ivb_orderflow`；未設或 `all` = 全部策略 |
 | `OKX_ACCOUNT1_TESTNET_API_KEY` 等 | Demo 金鑰三件套 × 各帳戶 |
 | `TRADING_ACCOUNTS` | `account1,account2` |
 
